@@ -66,5 +66,20 @@ TOOLS = bats \
 tools:
 	./hack/tools.sh
 
+# Prefer the distribution's packages over downloading release binaries from
+# GitHub: it works in environments restricted to already-configured package
+# repositories, and needs no root. hack/tools.sh remains the fallback for
+# anything the distribution does not carry.
+.PHONY: tools-from-packages
+tools-from-packages:
+	./hack/tools-from-packages.sh
+
 $(TOOLS):
-	./hack/tools.sh $@
+	@if [ -x "$(LOCALBIN)/$@" ]; then \
+		echo "$@ already present in $(LOCALBIN)"; \
+	elif ./hack/tools-from-packages.sh $@; then \
+		:; \
+	else \
+		echo "falling back to downloading $@"; \
+		./hack/tools.sh $@; \
+	fi
