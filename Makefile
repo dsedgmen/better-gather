@@ -34,6 +34,16 @@ $(call build-image,ocp-must-gather,$(IMAGE_REGISTRY)/ocp/4.17:ocp-must-gather, .
 
 $(call verify-golang-versions,Dockerfile.ocp)
 
+# Overlay build: layer the collection scripts onto an existing must-gather
+# image, so the base is version-matched to the cluster under test and needs no
+# CI credentials. See Dockerfile.overlay.
+BASE ?= quay.io/openshift/origin-must-gather:latest
+OVERLAY_IMAGE ?= better-gather:latest
+
+.PHONY: image-overlay
+image-overlay:
+	podman build --build-arg BASE=$(BASE) -t $(OVERLAY_IMAGE) -f Dockerfile.overlay .
+
 # Directories containing shell scripts to lint and format
 SCRIPT_DIRS := collection-scripts/ hack/ tests/
 
