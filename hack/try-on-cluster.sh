@@ -84,21 +84,43 @@ if ! [[ "$payload" =~ ^[A-Za-z0-9+/=]+$ ]]; then
 fi
 
 # Single argv element, so oc's strings.Join leaves it intact.
+# The launcher travels base64-encoded too, not inlined. oc drops the command
+# into an *unquoted* heredoc, so any $ or $(...) in an argument the caller
+# passed would be expanded on this machine rather than in the pod.
+launcher="#!/bin/bash
+set -eu
+echo 'INFO: running ${script} from the working tree'
+exec ${POD_DIR}/${script}"
+for arg in ${script_args+"${script_args[@]}"}; do
+	launcher+=" $(printf '%q' "$arg")"
+done
+launcher+="
+"
+launcher_b64="$(printf '%s' "$launcher" | base64 -w0)"
+
+for blob in "$payload" "$launcher_b64"; do
+	if ! [[ "$blob" =~ ^[A-Za-z0-9+/=]+$ ]]; then
+		echo "ERROR: payload is not pure base64; oc's heredoc would mangle it" >&2
+		exit 1
+	fi
+done
+
 remote_cmd="echo '${payload}' | base64 -d >/tmp/bg.tgz"
 remote_cmd+=" && mkdir -p ${POD_DIR}"
 remote_cmd+=" && tar xzf /tmp/bg.tgz -C ${POD_DIR} --strip-components=1"
 remote_cmd+=" && chmod +x ${POD_DIR}/*"
-remote_cmd+=" && echo 'INFO: running ${script} from the working tree'"
-remote_cmd+=" && ${POD_DIR}/${script}"
-for arg in ${script_args+"${script_args[@]}"}; do
-	remote_cmd+=" ${arg}"
-done
+remote_cmd+=" && echo '${launcher_b64}' | base64 -d >/tmp/bg-run.sh"
+remote_cmd+=" && bash /tmp/bg-run.sh"
 
 if [[ "$dry_run" == true ]]; then
 	echo "oc adm must-gather ${oc_args[*]-} -- <${#payload} char payload>"
 	echo
 	echo "--- in-pod command (payload elided) ---"
-	echo "${remote_cmd/${payload}/<base64 of collection-scripts/>}"
+	local_view="${remote_cmd/${payload}/<base64 of collection-scripts/>}"
+	echo "${local_view/${launcher_b64}/<base64 of launcher>}"
+	echo
+	echo "--- launcher (decoded) ---"
+	printf '%s\n' "$launcher"
 	exit 0
 fi
 

@@ -59,10 +59,21 @@ fetch_package() {
 
 	echo "INFO: downloading ${package} from the configured repositories"
 	# --destdir keeps it out of the working tree; no root needed.
-	dnf download --quiet --destdir "$RPM_CACHE" "$package" >/dev/null 2>&1 || {
-		echo "ERROR: ${package} is not available from the configured repositories" >&2
-		return 1
-	}
+	#
+	# Try the distribution repositories first. A third-party repo that
+	# happens to be configured can prompt to import a GPG key, which blocks
+	# a non-interactive run over a key we have no need for. The fallback
+	# passes -y so that prompt cannot hang the build either.
+	if dnf download --quiet --destdir "$RPM_CACHE" \
+		--repo=fedora --repo=updates "$package" >/dev/null 2>&1; then
+		return 0
+	fi
+	if dnf download -y --quiet --destdir "$RPM_CACHE" "$package" >/dev/null 2>&1; then
+		return 0
+	fi
+
+	echo "ERROR: ${package} is not available from the configured repositories" >&2
+	return 1
 }
 
 unpack_package() {
