@@ -7,7 +7,13 @@ get_log_collection_args
 BASE_COLLECTION_PATH="/must-gather"
 WINDOWS_NODE_LOGS=$BASE_COLLECTION_PATH/host_service_logs/windows
 
-# Logfile list
+# Logfile list.
+#
+# These are fixed filenames, not a rotated listing, so there is nothing for
+# the --since window to select between: each file is fetched whole. oc drops
+# --since for a --path request anyway (it only applies it to journal queries),
+# and these are Windows service logs with no timestamp format we can trim on.
+# Recorded as out of scope in the --since report rather than silently ignored.
 LOGS=(kube-proxy/kube-proxy.log)
 LOGS+=(hybrid-overlay/hybrid-overlay.log)
 LOGS+=(kubelet/kubelet.log)
@@ -39,6 +45,12 @@ for log in "${LOGS[@]}"; do
 	PIDS+=($!)
 done
 wait "${PIDS[@]}"
+
+# shellcheck source=collection-scripts/since_common.sh
+source "$(dirname "$0")/since_common.sh"
+get_since_cutoff
+since_report_header
+since_report "windows_node_logs" "not-applicable-fixed-filenames" "${#LOGS[@]}" "0"
 
 # force disk flush to ensure that all data gathered is accessible in the copy container
 sync

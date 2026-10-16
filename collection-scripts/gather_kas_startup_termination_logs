@@ -9,6 +9,14 @@ set -o pipefail
 source "$(dirname "$0")/common.sh"
 get_log_collection_args
 
+# oc drops --since for a --path request and the kubelet does not time-filter
+# file serving, so the arguments threaded through below have no effect on
+# their own. Apply the window here instead.
+# shellcheck source=collection-scripts/since_common.sh
+source "$(dirname "$0")/since_common.sh"
+get_since_cutoff
+since_report_header
+
 BASE_COLLECTION_PATH="${BASE_COLLECTION_PATH:-/must-gather}"
 
 echo "WARNING: Collecting one or more kube-apiserver related logs on ALL masters in your cluster. This could take a large amount of time." >&2
@@ -26,6 +34,7 @@ for path in "${paths[@]}"; do
 	mkdir -p "$output_dir"
 	oc adm node-logs ${node_log_collection_args:+"$node_log_collection_args"} --role=master --path="$path" |
 		grep -E '(startup.*.log|termination.log)' |
+		filter_names_since "static-pods/$path" |
 		sed "s|^|$path $output_dir |" |
 		sed "s|$| '${node_log_collection_args}'|"
 done |
