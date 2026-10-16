@@ -413,3 +413,85 @@ another plain line"
 	assert_output --partial "no-window"
 	assert_output --partial "predicate=[]"
 }
+
+# =============================================================================
+# copy_pod_dir_since() / pod_tar_dirs_since() layout
+# =============================================================================
+#
+# These exercise the path arithmetic only, with a stub oc. Getting it wrong
+# silently reshapes the archive: tarring an absolute path lands everything
+# under <dest>/a/b/... instead of where oc cp or rsync would have put it.
+
+@test "copy_pod_dir_since tars the directory itself without a trailing slash" {
+	run bash -c "
+		export MUST_GATHER_SINCE_TIME='2026-10-16T12:00:00Z'
+		export SINCE_REPORT_PATH=\"$TEST_TMPDIR/report.txt\"
+		mkdir -p \"$TEST_TMPDIR/mocks\"
+		printf '#!/bin/bash\necho \"\$*\" >>\"$TEST_TMPDIR/cmds\"\nexit 0\n' > \"$TEST_TMPDIR/mocks/oc\"
+		chmod +x \"$TEST_TMPDIR/mocks/oc\"
+		export PATH=\"$TEST_TMPDIR/mocks:\$PATH\"
+		source \"$SCRIPT_DIR/since_common.sh\"
+		get_since_cutoff
+		copy_pod_dir_since ns pod '' /a/b \"$TEST_TMPDIR/dest\" lbl >/dev/null 2>&1
+		grep -o \"cd '[^']*' .*find '[^']*'\" \"$TEST_TMPDIR/cmds\" | tail -1
+	"
+	assert_success
+	assert_output --partial "cd '/a'"
+	assert_output --partial "find 'b'"
+}
+
+@test "copy_pod_dir_since tars the contents with a trailing slash" {
+	run bash -c "
+		export MUST_GATHER_SINCE_TIME='2026-10-16T12:00:00Z'
+		export SINCE_REPORT_PATH=\"$TEST_TMPDIR/report.txt\"
+		mkdir -p \"$TEST_TMPDIR/mocks\"
+		printf '#!/bin/bash\necho \"\$*\" >>\"$TEST_TMPDIR/cmds\"\nexit 0\n' > \"$TEST_TMPDIR/mocks/oc\"
+		chmod +x \"$TEST_TMPDIR/mocks/oc\"
+		export PATH=\"$TEST_TMPDIR/mocks:\$PATH\"
+		source \"$SCRIPT_DIR/since_common.sh\"
+		get_since_cutoff
+		copy_pod_dir_since ns pod '' /a/b/ \"$TEST_TMPDIR/dest\" lbl >/dev/null 2>&1
+		grep -o \"cd '[^']*' .*find '[^']*'\" \"$TEST_TMPDIR/cmds\" | tail -1
+	"
+	assert_success
+	assert_output --partial "cd '/a/b'"
+	assert_output --partial "find '.'"
+}
+
+@test "copy_pod_dir_since falls back to oc cp without a window" {
+	run bash -c "
+		unset MUST_GATHER_SINCE MUST_GATHER_SINCE_TIME
+		export SINCE_REPORT_PATH=\"$TEST_TMPDIR/report.txt\"
+		mkdir -p \"$TEST_TMPDIR/mocks\"
+		printf '#!/bin/bash\necho \"\$*\" >>\"$TEST_TMPDIR/cmds\"\nexit 0\n' > \"$TEST_TMPDIR/mocks/oc\"
+		chmod +x \"$TEST_TMPDIR/mocks/oc\"
+		export PATH=\"$TEST_TMPDIR/mocks:\$PATH\"
+		source \"$SCRIPT_DIR/since_common.sh\"
+		get_since_cutoff
+		copy_pod_dir_since ns pod '' /a/b/ \"$TEST_TMPDIR/dest\" lbl >/dev/null 2>&1
+		cat \"$TEST_TMPDIR/cmds\"
+	"
+	assert_success
+	# unchanged upstream behaviour, and the trailing slash is dropped for oc cp
+	assert_output --partial "cp -n ns pod:/a/b"
+	refute_output --partial "find"
+}
+
+@test "pod_tar_dirs_since makes several absolute paths relative to /" {
+	run bash -c "
+		export MUST_GATHER_SINCE_TIME='2026-10-16T12:00:00Z'
+		export SINCE_REPORT_PATH=\"$TEST_TMPDIR/report.txt\"
+		mkdir -p \"$TEST_TMPDIR/mocks\"
+		printf '#!/bin/bash\necho \"\$*\" >>\"$TEST_TMPDIR/cmds\"\nexit 0\n' > \"$TEST_TMPDIR/mocks/oc\"
+		chmod +x \"$TEST_TMPDIR/mocks/oc\"
+		export PATH=\"$TEST_TMPDIR/mocks:\$PATH\"
+		source \"$SCRIPT_DIR/since_common.sh\"
+		get_since_cutoff
+		pod_tar_dirs_since ns pod compute \"$TEST_TMPDIR/dest\" lbl \
+			/var/log/libvirt/qemu/ /var/run/libvirt/qemu/log/ >/dev/null 2>&1
+		cat \"$TEST_TMPDIR/cmds\"
+	"
+	assert_success
+	assert_output --partial "cd / && find 'var/log/libvirt/qemu/' 'var/run/libvirt/qemu/log/'"
+	assert_output --partial "-newermt @"
+}

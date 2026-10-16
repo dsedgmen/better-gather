@@ -220,11 +220,21 @@ filter_names_since() {
 # say so, rather than collecting nothing.
 #
 # The container is optional; pass "" to use the pod's default container.
+#
+# Layout follows the same trailing-slash convention as rsync and oc cp, so a
+# call site keeps the output shape it had before:
+#
+#   src = /a/b   ->  <dest>/b/...     (the directory itself, like `oc cp`)
+#   src = /a/b/  ->  <dest>/...       (its contents, like `rsync src/ dest`)
+#
+# This matters: tarring an absolute path would land everything under
+# <dest>/a/b/... instead, silently reshaping the archive.
+#
 # Usage: copy_pod_dir_since <namespace> <pod> <container> <src-dir> <dest-dir> [label]
 copy_pod_dir_since() {
 	local ns="$1" pod="$2" container="$3" src="$4" dest="$5"
 	local label="${6:-${pod}}"
-	local predicate before after total
+	local predicate before after total chdir target
 	local -a c_arg=()
 
 	[ -n "${container}" ] && c_arg=(-c "${container}")
@@ -232,27 +242,35 @@ copy_pod_dir_since() {
 	mkdir -p "${dest}"
 
 	if ! since_window_requested; then
-		oc cp -n "${ns}" "${c_arg[@]}" "${pod}:${src}" "${dest}"
+		oc cp -n "${ns}" "${c_arg[@]}" "${pod}:${src%/}" "${dest}"
 		return $?
+	fi
+
+	if [ "${src}" != "${src%/}" ]; then
+		chdir="${src%/}"
+		target="."
+	else
+		chdir="$(dirname "${src}")"
+		target="$(basename "${src}")"
 	fi
 
 	if ! oc exec -n "${ns}" "${pod}" "${c_arg[@]}" -- \
 		sh -c 'command -v find >/dev/null 2>&1 && command -v tar >/dev/null 2>&1' 2>/dev/null; then
 		echo "INFO: ${label}: find/tar unavailable in ${pod}; copying ${src} whole" >&2
-		oc cp -n "${ns}" "${c_arg[@]}" "${pod}:${src}" "${dest}"
+		oc cp -n "${ns}" "${c_arg[@]}" "${pod}:${src%/}" "${dest}"
 		since_report "${label}" "unfiltered-fallback" "all" "0"
 		return $?
 	fi
 
 	total="$(oc exec -n "${ns}" "${pod}" "${c_arg[@]}" -- \
-		sh -c "find '${src}' -type f 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')"
+		sh -c "cd '${chdir}' 2>/dev/null && find '${target}' -type f 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')"
 	before="$(find "${dest}" -type f 2>/dev/null | wc -l)"
 
 	predicate="$(since_find_predicate)"
 
 	# shellcheck disable=SC2086
 	oc exec -n "${ns}" "${pod}" "${c_arg[@]}" -- \
-		sh -c "find '${src}' -type f ${predicate} -print0 2>/dev/null | tar czf - --null -T - 2>/dev/null" |
+		sh -c "cd '${chdir}' 2>/dev/null && find '${target}' -type f ${predicate} -print0 2>/dev/null | tar czf - --null -T - 2>/dev/null" |
 		tar xzf - -C "${dest}" 2>/dev/null
 
 	after="$(find "${dest}" -type f 2>/dev/null | wc -l)"
@@ -283,16 +301,19 @@ pod_tar_dirs_since() {
 
 	local dir
 	for dir in "$@"; do
-		quoted+=" '${dir}'"
+		# relative to / so tar records paths without a leading slash
+		quoted+="${quoted:+ }'${dir#/}'"
 	done
 
 	predicate="$(since_find_predicate)"
 
-	# -prune-less: just let find skip what does not exist, as tar
-	# --ignore-failed-read would.
+	# find skips what does not exist, as tar --ignore-failed-read would.
+	# tar is given -C / with relative member names so the absolute source
+	# paths are reproduced under dest, which is what the callers that tar
+	# several unrelated directories at once expect.
 	# shellcheck disable=SC2086
 	oc exec -n "${ns}" "${pod}" "${c_arg[@]}" -- \
-		sh -c "find ${quoted} -type f ${predicate} -print0 2>/dev/null | tar czf - --null -T - 2>/dev/null" |
+		sh -c "cd / && find ${quoted} -type f ${predicate} -print0 2>/dev/null | tar czf - --null -T - 2>/dev/null" |
 		tar xzf - -C "${dest}" 2>/dev/null
 
 	if since_window_requested; then
