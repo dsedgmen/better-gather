@@ -1,4 +1,9 @@
 #!/bin/bash
+# shellcheck source=collection-scripts/since_common.sh
+source "$(dirname "$0")/since_common.sh"
+get_since_cutoff
+since_report_header
+
 BASE_COLLECTION_PATH="must-gather"
 CORE_DUMP_PATH=${OUT:-"${BASE_COLLECTION_PATH}/node_core_dumps"}
 
@@ -22,7 +27,11 @@ function get_dump_off_node {
 	else
 		#Copy Core Dumps out of Nodes suppress Stdout
 		echo "Copying core dumps on node ""$1"""
-		oc cp --loglevel 1 -n "default" "$debugPod":/host/var/lib/systemd/coredump "${CORE_DUMP_PATH}/${1}_core_dump" >/dev/null 2>&1 && PIDS+=($!)
+		# Coredumps accumulate indefinitely and are large, so a --since
+		# window matters here more than almost anywhere else.
+		copy_pod_dir_since "default" "$debugPod" "" \
+			/host/var/lib/systemd/coredump \
+			"${CORE_DUMP_PATH}/${1}_core_dump" "core_dumps/${1}" >/dev/null 2>&1 && PIDS+=($!)
 
 		#clean up debug pod after we are done using them
 		oc delete pod "$debugPod" -n "default"

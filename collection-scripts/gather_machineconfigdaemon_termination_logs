@@ -1,5 +1,12 @@
 #!/bin/bash
 
+# shellcheck source=collection-scripts/since_common.sh
+SINCE_COMMON="$(dirname "$0")/since_common.sh"
+source "${SINCE_COMMON}"
+export SINCE_COMMON
+get_since_cutoff
+since_report_header
+
 BASE_COLLECTION_PATH="must-gather"
 MACHINECONFIG_DAEMON_LOG_PATH=${OUT:-"${BASE_COLLECTION_PATH}/machine_config_termination_logs"}
 
@@ -17,7 +24,10 @@ function gather_machineconfigdaemon_termination_logs {
 		FOLDER_EXISTS=$(oc exec -n openshift-machine-config-operator "${DAEMONPOD}" -c machine-config-daemon -- sh -c '[ -d "/rootfs/etc/machine-config-daemon/previous-logs" ] && echo "exists"' 2>/dev/null)
 		# collect the logs from the location that MCD saves to prior to shutdown
 		if [ "${FOLDER_EXISTS}" == "exists" ]; then
-			timeout -v 1m oc cp -c machine-config-daemon openshift-machine-config-operator/"${DAEMONPOD}":rootfs/etc/machine-config-daemon/previous-logs "${MACHINECONFIG_DAEMON_LOG_PATH}/${NODE}/" &
+			timeout -v 1m bash -c "source \"\${SINCE_COMMON}\"; copy_pod_dir_since \
+				openshift-machine-config-operator '${DAEMONPOD}' machine-config-daemon \
+				rootfs/etc/machine-config-daemon/previous-logs \
+				'${MACHINECONFIG_DAEMON_LOG_PATH}/${NODE}/' 'mcd_termination_logs/${NODE}'" &
 			PIDS+=($!)
 		else
 			echo "INFO: 'previous-logs' folder not found on ${NODE}, skipping..."
