@@ -24,8 +24,102 @@
 # Everything here is a no-op when no window was requested, so sourcing it
 # cannot change the default behaviour of a script.
 #
-# shellcheck source=collection-scripts/common.sh
-source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+# This file is deliberately self-contained: it is vendored verbatim into the
+# CNV and ODF must-gather forks, which have no common.sh. Keep it that way --
+# hack/sync-since-lib.sh copies it, and each fork tests that its copy matches.
+
+# Convert a Go duration (as oc writes MUST_GATHER_SINCE: 30m0s, 2h30m0s) into
+# total whole seconds. Sub-second components are dropped; they cannot move a
+# whole-second cutoff. Echoes 0 when nothing parses.
+duration_to_seconds() {
+	local rest="${1:-}" total=0 value unit
+
+	# Remove sub-second components first so that, for example, the 'm' of
+	# '500ms' is never mistaken for minutes.
+	rest="$(echo "${rest}" | sed -E 's/[0-9]+(\.[0-9]+)?(ns|us|µs|ms)//g')"
+	# Truncate fractions on the remaining units: 1.5s counts as 1 second.
+	rest="$(echo "${rest}" | sed -E 's/([0-9]+)\.[0-9]+/\1/g')"
+
+	while [[ "${rest}" =~ ^([0-9]+)([dhms])(.*)$ ]]; do
+		value="${BASH_REMATCH[1]}"
+		unit="${BASH_REMATCH[2]}"
+		rest="${BASH_REMATCH[3]}"
+		case "${unit}" in
+		d) total=$((total + value * 86400)) ;;
+		h) total=$((total + value * 3600)) ;;
+		m) total=$((total + value * 60)) ;;
+		s) total=$((total + value)) ;;
+		esac
+	done
+
+	echo "${total}"
+}
+
+# Collapse a Go duration into the single component that `oc adm node-logs
+# --since` accepts: '(+|-)[0-9]+(s|m|h|d)'.
+#
+# The result is always exactly equal to the input, never rounded. The unit is
+# only cosmetic -- pick the largest one that divides the total evenly, and fall
+# back to seconds, which is always exact. So 2h30m0s becomes 150m, not 2h
+# (which loses half an hour) and not 3h (which collects more than was asked
+# for).
+duration_to_node_logs_since() {
+	local seconds
+	seconds="$(duration_to_seconds "${1:-}")"
+
+	if [ "${seconds}" -le 0 ]; then
+		if [[ "${1:-}" =~ [0-9](ns|us|µs|ms) ]]; then
+			# A sub-second window. node-logs has no finer unit than the
+			# second, so ask for one. Passing the original through would
+			# hand it '500ms', which it reads as 500 *minutes*.
+			echo "1s"
+		else
+			# Nothing recognisable; pass the original through untouched so
+			# the behaviour is no worse than not having this function.
+			echo "${1:-}"
+		fi
+	elif [ "$((seconds % 86400))" -eq 0 ]; then
+		echo "$((seconds / 86400))d"
+	elif [ "$((seconds % 3600))" -eq 0 ]; then
+		echo "$((seconds / 3600))h"
+	elif [ "$((seconds % 60))" -eq 0 ]; then
+		echo "$((seconds / 60))m"
+	else
+		echo "${seconds}s"
+	fi
+}
+
+# Resolve the requested collection window to an absolute cutoff, for the
+# collection that has to apply the window itself. See since_common.sh.
+#
+# Sets:
+#   since_cutoff_epoch   - seconds since the epoch, empty when no window was
+#                          requested
+#   since_cutoff_rfc3339 - the same instant, RFC3339 UTC
+#
+# MUST_GATHER_SINCE_TIME wins over MUST_GATHER_SINCE, matching the precedence
+# get_log_collection_args already uses.
+get_since_cutoff() {
+	local seconds
+	since_cutoff_epoch=""
+	since_cutoff_rfc3339=""
+
+	if [ -n "${MUST_GATHER_SINCE_TIME:-}" ]; then
+		since_cutoff_epoch="$(date -u -d "${MUST_GATHER_SINCE_TIME}" +%s 2>/dev/null)" ||
+			since_cutoff_epoch=""
+	elif [ -n "${MUST_GATHER_SINCE:-}" ]; then
+		seconds="$(duration_to_seconds "${MUST_GATHER_SINCE}")"
+		if [ "${seconds}" -gt 0 ]; then
+			since_cutoff_epoch="$(($(date -u +%s) - seconds))"
+		fi
+	fi
+
+	if [ -n "${since_cutoff_epoch}" ]; then
+		since_cutoff_rfc3339="$(date -u -d "@${since_cutoff_epoch}" +%Y-%m-%dT%H:%M:%SZ)"
+	fi
+
+	export since_cutoff_epoch since_cutoff_rfc3339
+}
 
 SINCE_REPORT_PATH="${SINCE_REPORT_PATH:-${BASE_COLLECTION_PATH:-/must-gather}/since-report.txt}"
 
@@ -164,6 +258,50 @@ copy_pod_dir_since() {
 	after="$(find "${dest}" -type f 2>/dev/null | wc -l)"
 	since_report "${label}" "find-newermt" "$((after - before))" \
 		"$((${total:-0} - (after - before)))"
+}
+
+# Stream several directories out of a pod as one tarball, limited to files
+# modified inside the window.
+#
+# The multi-directory sibling of copy_pod_dir_since, for collection that
+# already tars a fixed set of log directories in one shot -- CNV's QEMU log
+# collection does exactly that with
+# `tar -cf - /var/log/libvirt/qemu/ /var/run/libvirt/qemu/log/ ...`.
+#
+# Missing directories are ignored, matching tar --ignore-failed-read, so this
+# is safe to point at paths that only exist on some pods.
+#
+# Usage: pod_tar_dirs_since <namespace> <pod> <container> <dest-dir> <label> <src-dir>...
+pod_tar_dirs_since() {
+	local ns="$1" pod="$2" container="$3" dest="$4" label="$5"
+	shift 5
+	local predicate quoted=""
+	local -a c_arg=()
+
+	[ -n "${container}" ] && c_arg=(-c "${container}")
+	mkdir -p "${dest}"
+
+	local dir
+	for dir in "$@"; do
+		quoted+=" '${dir}'"
+	done
+
+	predicate="$(since_find_predicate)"
+
+	# -prune-less: just let find skip what does not exist, as tar
+	# --ignore-failed-read would.
+	# shellcheck disable=SC2086
+	oc exec -n "${ns}" "${pod}" "${c_arg[@]}" -- \
+		sh -c "find ${quoted} -type f ${predicate} -print0 2>/dev/null | tar czf - --null -T - 2>/dev/null" |
+		tar xzf - -C "${dest}" 2>/dev/null
+
+	if since_window_requested; then
+		since_report "${label}" "find-newermt" \
+			"$(find "${dest}" -type f 2>/dev/null | wc -l)" "pre-cutoff"
+	else
+		since_report "${label}" "no-window" \
+			"$(find "${dest}" -type f 2>/dev/null | wc -l)" "0"
+	fi
 }
 
 # Drop JSON-lines records older than the cutoff, by an RFC3339 field.
