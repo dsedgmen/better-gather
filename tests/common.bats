@@ -377,6 +377,9 @@ load test_helper
 
 	assert_success
 	assert_output --partial "log_collection_args=--since=2h30m"
-	# node_log_collection_args extracts only the first time unit
-	assert_output --partial "node_log_collection_args=--since=-2h"
+	# node-logs takes a single '(+|-)[0-9]+(s|m|h|d)' component, so the
+	# duration is collapsed into one -- but exactly, not by truncation.
+	# Keeping only the first component yields -2h and silently drops the
+	# oldest 30 minutes of the window the user asked for.
+	assert_output --partial "node_log_collection_args=--since=-150m"
 }
