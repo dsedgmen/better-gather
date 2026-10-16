@@ -1,7 +1,10 @@
 #!/bin/bash
 
-source $(dirname "$0")/common.sh
+# shellcheck source=collection-scripts/common.sh
+source "$(dirname "$0")/common.sh"
 BASE_COLLECTION_PATH="must-gather"
+# operator_ns and log_collection_args are set by common.sh
+# shellcheck disable=SC2154
 get_operator_ns "nfd"
 get_log_collection_args
 
@@ -10,10 +13,12 @@ function get_nfd_crs() {
 
     for CRD in "${NFD_CRDS[@]}"; do
         echo "INFO: Collecting NFD Data for ${CRD} in namespace ${operator_ns}"
+        # shellcheck disable=SC2086,SC2154  # intentional word splitting
         oc adm inspect ${log_collection_args} --dest-dir "${BASE_COLLECTION_PATH}" "${CRD}" -n "${operator_ns}"
     done
 }
 
+# shellcheck disable=SC2086,SC2154  # intentional word splitting
 oc adm inspect ${log_collection_args} --dest-dir "${BASE_COLLECTION_PATH}" "ns/${operator_ns}"
 get_nfd_crs
 
