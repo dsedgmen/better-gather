@@ -495,3 +495,21 @@ another plain line"
 	assert_output --partial "cd / && find 'var/log/libvirt/qemu/' 'var/run/libvirt/qemu/log/'"
 	assert_output --partial "-newermt @"
 }
+
+@test "every script calling the library also sources it" {
+	# gather runs each gather_* as a separate script, so functions defined in
+	# a parent shell are not inherited. Forgetting the source is silent: the
+	# collection runs, logs nothing unusual, and gathers nothing. This cost a
+	# wasted cluster run in the ODF fork before it was caught.
+	cd "$SCRIPT_DIR"
+	local missing=""
+	for f in gather_*; do
+		if grep -qE '\b(copy_pod_dir_since|pod_tar_dirs_since|filter_names_since|since_find_predicate|trim_jsonl_since|since_report)\b' "$f"; then
+			grep -q 'since_common.sh' "$f" || missing="$missing $f"
+		fi
+	done
+	[ -z "$missing" ] || {
+		echo "scripts use the library but never source it:$missing" >&2
+		false
+	}
+}
