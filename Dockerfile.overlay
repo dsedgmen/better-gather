@@ -1,0 +1,21 @@
+# Layer better-gather's collection scripts onto an existing must-gather image.
+#
+# Dockerfile.ocp builds from registry.ci.openshift.org, which needs CI
+# credentials and produces an image a cluster cannot necessarily pull. For
+# testing against a real cluster it is simpler and more faithful to overlay
+# the scripts onto the must-gather image that cluster already runs: the base
+# is then guaranteed to be version-matched and pullable, and the only
+# difference from stock is the thing being tested.
+#
+#   make image-overlay BASE=$(oc adm release info --image-for=must-gather)
+#
+# The base already carries jq (Dockerfile.ocp installs it), which
+# trim_jsonl_since needs.
+
+ARG BASE=quay.io/openshift/origin-must-gather:latest
+FROM ${BASE}
+
+COPY collection-scripts/* /usr/bin/
+
+LABEL io.k8s.display-name="better-gather" \
+      io.k8s.description="must-gather collection scripts that honour --since"

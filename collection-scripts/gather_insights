@@ -10,7 +10,21 @@ COLLECTOR=${1:-rsync}         #Define what oc collector to use (oc rsync or oc c
 INSIGHTS_OPERATOR_POD=$(oc get pods --namespace=openshift-insights -o custom-columns=:metadata.name --no-headers  --field-selector=status.phase=Running)
 
 echo "INFO: Collecting Insights Archives from $INSIGHTS_OPERATOR_POD"
-oc $COLLECTOR --namespace=openshift-insights openshift-insights/$INSIGHTS_OPERATOR_POD:/var/lib/insights-operator $INSIGHTS_DATA_PATH
+# shellcheck source=collection-scripts/since_common.sh
+source "$(dirname "$0")/since_common.sh"
+get_since_cutoff
+since_report_header
+
+if since_window_requested; then
+	# Archives are named insights-<timestamp>.tar.gz and written once, so
+	# mtime is creation time. This is the "prune or limit" the TODO below
+	# asks for, scoped to the window already requested.
+	echo "INFO: limiting archives to those written since ${since_cutoff_rfc3339}"
+	copy_pod_dir_since openshift-insights "$INSIGHTS_OPERATOR_POD" "" \
+		/var/lib/insights-operator "$INSIGHTS_DATA_PATH" insights
+else
+	oc $COLLECTOR --namespace=openshift-insights openshift-insights/$INSIGHTS_OPERATOR_POD:/var/lib/insights-operator $INSIGHTS_DATA_PATH
+fi
 
 #TODO: Prune or Limit the data that is collected/synced (as this might be a lot to add to the archive).
 

@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# duration_to_node_logs_since and get_since_cutoff live in
+# since_common.sh so the library is self-contained and can be vendored
+# into the CNV and ODF forks. The dependency runs one way only.
+# shellcheck source=collection-scripts/since_common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/since_common.sh"
+
 function get_operator_ns() {
     local operator_name=$(echo \"$1\")
     cmd="$(echo "oc get subs -A -o template --template '{{range .items}}{{if eq .spec.name ""${operator_name}""}}{{.metadata.namespace}}{{\"\\n\"}}{{end}}{{end}}'")"
@@ -36,7 +42,11 @@ get_log_collection_args() {
 	node_log_collection_args=""
 
 	if [ -n "${MUST_GATHER_SINCE:-}" ]; then
-		since=$(echo "${MUST_GATHER_SINCE:-}" | sed 's/\([0-9]*[dhms]\).*/\1/')
+		# node-logs takes a single '(+|-)[0-9]+(s|m|h|d)' component, so a multi-component
+		# duration has to be collapsed into one. Keeping only the first
+		# component, as this did, silently narrows the window: 2h30m
+		# becomes -2h and 500ms becomes -500m, read as 500 minutes.
+		since=$(duration_to_node_logs_since "${MUST_GATHER_SINCE}")
 		node_log_collection_args=--since="-${since}"
 	fi
 	if [ -n "${MUST_GATHER_SINCE_TIME:-}" ]; then
