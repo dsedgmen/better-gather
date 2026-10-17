@@ -91,7 +91,7 @@ edit_re(f"{CS}/common.sh",
 # --------------------------------------------------------------------------
 
 edit_re(f"{CS}/gather_audit_logs",
-        r'(source "\$\(dirname "\$0"\)/common\.sh"\n[ \t]*get_log_collection_args\n)',
+        r'(source "?\$\(dirname "\$0"\)/common\.sh"?\n[ \t]*get_log_collection_args\n)',
         r'''\1
 # oc drops --since for a --path request and the kubelet does not time-filter
 # file serving, so the arguments threaded through below have no effect on

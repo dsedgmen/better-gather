@@ -60,7 +60,14 @@ backport_one() {
 		return 1
 	fi
 
+	# Start from a genuinely clean tree. Without this the previous
+	# branch's edits survive the checkout and the next branch reports
+	# them as "already applied" while carrying another release's code.
+	git reset -q --hard
+	git clean -qfd -e tmp
 	git checkout -q -B "${branch}" "${upstream}"
+	git reset -q --hard "${upstream}"
+	git clean -qfd -e tmp
 
 	local f
 	for f in "${OURS[@]}"; do
