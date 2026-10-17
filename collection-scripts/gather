@@ -10,8 +10,23 @@ version >>/must-gather/version
 source "$(dirname "$0")/common.sh"
 get_log_collection_args
 
-# Store PIDs of all the subprocesses
-pids=()
+# Readable, sos-style progress instead of two dozen scripts interleaving
+# their output into one unreadable stream.
+# shellcheck source=collection-scripts/task_common.sh
+source "$(dirname "$0")/task_common.sh"
+
+# Every task this run will launch. Declared up front so the plan can be
+# printed before anything starts; a mismatch between this list and the
+# task_run calls below is reported by task_summary.
+all_tasks=(
+	core:named core:groups core:all-namespaces insights monitoring olm
+	olm_v1 priority_and_fairness etcd service_logs windows_node_logs
+	haproxy_config kas_startup_termination_logs network_logs_basics
+	metallb frrk8s nmstate nfd sriov virt podnetworkconnectivitycheck
+	machineconfig_ondisk machineconfigdaemon_termination_logs vsphere ppc
+	osus istio aro
+)
+task_plan "${all_tasks[@]}"
 
 # Named resource list, eg. ns/openshift-config
 named_resources=()
@@ -72,8 +87,8 @@ group_resources+=(clusterresourcequotas.quota.openshift.io)
 # Run the Collection of Resources using inspect
 # running across all-namespaces for the few "Autoscaler" resources.
 # shellcheck disable=SC2086
-oc adm inspect ${log_collection_args} --dest-dir must-gather ${rotated_pod_logs_arg} "${named_resources[@]}" &
-pids+=($!)
+task_run core:named \
+	oc adm inspect ${log_collection_args} --dest-dir must-gather ${rotated_pod_logs_arg} "${named_resources[@]}"
 
 filtered_group_resources=()
 for gr in "${group_resources[@]}"; do
@@ -88,121 +103,97 @@ group_resources_text=$(
 	echo "${filtered_group_resources[*]}"
 )
 # shellcheck disable=SC2086
-oc adm inspect ${log_collection_args} --dest-dir must-gather ${rotated_pod_logs_arg} "${group_resources_text}" &
-pids+=($!)
+task_run core:groups \
+	oc adm inspect ${log_collection_args} --dest-dir must-gather ${rotated_pod_logs_arg} "${group_resources_text}"
 
 all_ns_resources_text=$(
 	IFS=,
 	echo "${all_ns_resources[*]}"
 )
 # shellcheck disable=SC2086
-oc adm inspect ${log_collection_args} --dest-dir must-gather ${rotated_pod_logs_arg} "${all_ns_resources_text}" --all-namespaces &
-pids+=($!)
+task_run core:all-namespaces \
+	oc adm inspect ${log_collection_args} --dest-dir must-gather ${rotated_pod_logs_arg} "${all_ns_resources_text}" --all-namespaces
 
 # Gather Insights Operator Archives
-/usr/bin/gather_insights &
-pids+=($!)
+task_run insights /usr/bin/gather_insights
 
 # Gather monitoring data from the cluster
-/usr/bin/gather_monitoring &
-pids+=($!)
+task_run monitoring /usr/bin/gather_monitoring
 
 # Gather optional operator resources from all namespaces
-/usr/bin/gather_olm &
-pids+=($!)
+task_run olm /usr/bin/gather_olm
 
 # Gather OLM v1 resources
-/usr/bin/gather_olm_v1 &
-pids+=($!)
+task_run olm_v1 /usr/bin/gather_olm_v1
 
 # Gather API Priority and Fairness Endpoints
-/usr/bin/gather_priority_and_fairness &
-pids+=($!)
+task_run priority_and_fairness /usr/bin/gather_priority_and_fairness
 
 # Gather etcd information
-/usr/bin/gather_etcd &
-pids+=($!)
+task_run etcd /usr/bin/gather_etcd
 
 # Gather Service Logs (using a supplemental Script); Scoped to Masters.
-/usr/bin/gather_service_logs master &
-pids+=($!)
+task_run service_logs /usr/bin/gather_service_logs master
 
 # Gather Windows Kubernetes component logs
-/usr/bin/gather_windows_node_logs &
-pids+=($!)
+task_run windows_node_logs /usr/bin/gather_windows_node_logs
 
 # Gather HAProxy config files
-/usr/bin/gather_haproxy_config &
-pids+=($!)
+task_run haproxy_config /usr/bin/gather_haproxy_config
 
 # Gather kas startup and termination logs
-/usr/bin/gather_kas_startup_termination_logs &
-pids+=($!)
+task_run kas_startup_termination_logs /usr/bin/gather_kas_startup_termination_logs
 
 # Gather network logs
-/usr/bin/gather_network_logs_basics &
-pids+=($!)
+task_run network_logs_basics /usr/bin/gather_network_logs_basics
 
 # Gather metallb logs
-/usr/bin/gather_metallb &
-pids+=($!)
+task_run metallb /usr/bin/gather_metallb
 
 # Gather frr-k8s logs
-/usr/bin/gather_frrk8s &
-pids+=($!)
+task_run frrk8s /usr/bin/gather_frrk8s
 
 # Gather NMState
-/usr/bin/gather_nmstate &
-pids+=($!)
+task_run nmstate /usr/bin/gather_nmstate
 
 # Gather Node Feature Discovery (NFD)
-/usr/bin/gather_nfd &
-pids+=($!)
+task_run nfd /usr/bin/gather_nfd
 
 # Gather SR-IOV resources
-/usr/bin/gather_sriov &
-pids+=($!)
+task_run sriov /usr/bin/gather_sriov
 
 # Gather basic Virtualization resources
-/usr/bin/gather_virt &
-pids+=($!)
+task_run virt /usr/bin/gather_virt
 
 # Gather PodNetworkConnectivityCheck
-/usr/bin/gather_podnetworkconnectivitycheck &
-pids+=($!)
+task_run podnetworkconnectivitycheck /usr/bin/gather_podnetworkconnectivitycheck
 
 # Gather On-Disk MachineConfig files
-/usr/bin/gather_machineconfig_ondisk &
-pids+=($!)
+task_run machineconfig_ondisk /usr/bin/gather_machineconfig_ondisk
 
 # Gather On-Disk MachineConfigDaemon logs
-/usr/bin/gather_machineconfigdaemon_termination_logs &
-pids+=($!)
+task_run machineconfigdaemon_termination_logs /usr/bin/gather_machineconfigdaemon_termination_logs
 
 # Gather vSphere resources. This is NOOP on non-vSphere platform.
-/usr/bin/gather_vsphere &
-pids+=($!)
+task_run vsphere /usr/bin/gather_vsphere
 
 # Gather Performance profile information (nodes already inspected above via group_resources)
-MUST_GATHER_NODES_INSPECTED=true /usr/bin/gather_ppc &
-pids+=($!)
+task_run ppc env MUST_GATHER_NODES_INSPECTED=true /usr/bin/gather_ppc
 
 # Gather OSUS information
-/usr/bin/gather_osus &
-pids+=($!)
+task_run osus /usr/bin/gather_osus
 
 # Gather Istio/Gateway API information
-/usr/bin/gather_istio &
-pids+=($!)
+task_run istio /usr/bin/gather_istio
 
-# Check if PID array has any values, if so, wait for them to finish
-if [ ${#pids[@]} -ne 0 ]; then
-	echo "Waiting on subprocesses to finish execution."
-	wait "${pids[@]}"
-fi
+task_wait
 
-# Gather ARO information
-/usr/bin/gather_aro
+# Gather ARO information. Serial, after the parallel phase, as upstream has
+# it -- but still recorded so it shows up in the summary.
+task_run aro /usr/bin/gather_aro
+task_wait
+
+task_summary || true
 
 # Optionally compress collected log files before the sidecar copies them out.
 # Enabled via REDUCE_LOGS=compress_logs.
