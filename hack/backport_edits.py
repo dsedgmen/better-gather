@@ -190,6 +190,20 @@ edit(f"{CS}/gather_virt",
      required=False, label="gather_virt: array in string")
 
 # --------------------------------------------------------------------------
+# The branch's own test for the duration collapse, where it has one. Upstream
+# codified the truncation as expected behaviour, so it has to move with the
+# fix or the suite fails on its own assertion.
+# --------------------------------------------------------------------------
+
+edit("tests/common.bats",
+     'assert_output --partial "node_log_collection_args=--since=-2h"',
+     '# node-logs takes a single component, so the duration is collapsed --\n'
+     '\t# but exactly, not by truncation. Keeping only the first component\n'
+     '\t# yields -2h and silently drops the oldest 30 minutes.\n'
+     '\tassert_output --partial "node_log_collection_args=--since=-150m"',
+     required=False, label="common.bats: duration expectation")
+
+# --------------------------------------------------------------------------
 # Makefile: shell lint and tests, self-contained
 # --------------------------------------------------------------------------
 #

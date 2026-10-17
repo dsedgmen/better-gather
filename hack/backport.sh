@@ -76,11 +76,14 @@ backport_one() {
 			echo "  note: ${SOURCE_BRANCH} has no ${f}"
 	done
 
-	# Older release branches predate the bats suite entirely; they get the
-	# whole tests/ directory and the Makefile targets from us.
+	# Deliberately *not* copying main's tests/ wholesale onto branches that
+	# have none of their own. main's common.bats asserts upstream behaviour
+	# that differs by release -- REDUCE_LOGS and rotated-pod-logs handling
+	# do not exist in the 4.18-era common.sh -- so it would fail for reasons
+	# that have nothing to do with this backport. Only the three files that
+	# test *our* code come across, and they are in OURS above.
 	if [ ! -f tests/common.bats ]; then
-		git checkout -q "${SOURCE_BRANCH}" -- tests/ 2>/dev/null || true
-		echo "  note: branch had no tests/, took the suite from ${SOURCE_BRANCH}"
+		echo "  note: branch has no upstream bats suite; testing our code only"
 	fi
 
 	python3 hack/backport_edits.py || return 1
