@@ -155,6 +155,61 @@ installed system-wide, and the Makefile prefers it. `bats-support` and
 provides local equivalents of the four assertions the suite uses; the real
 libraries are still used when present.
 
+## Images
+
+CI builds the overlay image and pushes it to ghcr.io on `main`, on every
+`release-*` branch, and on a `v*` tag. Pull requests build and smoke-test but
+publish nothing.
+
+| ref | tags |
+| --- | --- |
+| `main` | `:latest`, `:main-<sha>` |
+| `release-4.18` | `:4.18`, `:release-4.18` |
+| `v1.2.3` | `:v1.2.3`, `:latest` |
+
+A release branch deliberately does not move `:latest`, so `--image …:4.18`
+keeps getting the 4.18 collection scripts whatever happens on main.
+
+**The packages are private**, inheriting the repository's visibility, so a
+cluster needs a pull secret. Create one in the namespace must-gather will run
+in, with a PAT that has `read:packages`:
+
+```console
+$ oc create namespace must-gather-run
+$ oc create secret docker-registry ghcr \
+    --docker-server=ghcr.io \
+    --docker-username=dsedgmen \
+    --docker-password=<PAT with read:packages> \
+    -n must-gather-run
+$ oc secrets link default ghcr --for=pull -n must-gather-run
+
+$ oc adm must-gather \
+    --run-namespace must-gather-run \
+    --image=ghcr.io/dsedgmen/better-gather:4.18 \
+    --since 30m
+```
+
+`--run-namespace` matters: without it the pod runs in a fresh temporary
+namespace that has no pull secret.
+
+To avoid the secret entirely, make the package public in the repository's
+package settings — note that publishes the collection scripts, since they are
+in the image layers.
+
+## Release branches
+
+`release-4.18` through `release-4.23`, each branched from upstream's own
+release branch and the --since work re-applied on top — not cherry-picked, since
+4.18 is 93 commits and 41 collection scripts behind main. `hack/backport.sh`
+regenerates them and reports every edit that did not apply, so a branch where
+upstream has moved fails loudly rather than quietly collecting everything.
+
+Each branch runs the same bats suite: 94 tests on 4.23, 82 on 4.22, and 37 on
+4.21 and older, which predate upstream's own suite and so test only this fork's
+code. Upstream's `common.bats` is deliberately *not* copied onto those
+branches: it asserts REDUCE_LOGS and rotated-pod-log behaviour that the
+4.18-era `common.sh` does not have.
+
 ## Staying current with upstream
 
 ```console
