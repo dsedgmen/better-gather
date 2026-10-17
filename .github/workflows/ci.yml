@@ -1,0 +1,166 @@
+# Build the must-gather container and check the collection scripts.
+#
+# Upstream's CI (.ci-operator.yaml, OWNERS, prow) does not run for this fork,
+# so this is what stands in for it.
+#
+# The lint and test job runs inside a Fedora container on purpose:
+# hack/tools-from-packages.sh gets bats, shellcheck and shfmt from the
+# distribution rather than downloading release binaries from GitHub, and that
+# needs dnf. It is the same path used locally, so CI and a laptop agree.
+#
+# The image is built against a *public* base so CI needs no registry
+# credentials. For real use you want the image your cluster actually runs --
+# see Dockerfile.overlay -- but for proving the overlay builds and the
+# scripts work inside it, the public base is equivalent.
+
+name: ci
+
+on:
+  push:
+    branches: [main, 'release-*']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  PUBLIC_BASE: quay.io/openshift/origin-must-gather:latest
+  PLATFORMS: linux/amd64
+  IMAGE_NAME: better-gather
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - name: Install the bits the container lacks
+        # git is needed by actions/checkout and by the test helper's
+        # `git rev-parse --show-toplevel`; rpm/cpio by tools-from-packages;
+        # numactl-libs because Fedora's shellcheck binary links against it and
+        # unpacking an rpm does not pull its dependencies; jq because
+        # trim_jsonl_since uses it and the must-gather images ship it.
+        run: dnf -y install --setopt=install_weak_deps=False
+          git make findutils tar gzip diffutils cpio rpm gawk numactl-libs jq
+
+      - uses: actions/checkout@v4
+
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Bootstrap tooling from the distribution
+        run: ./hack/tools-from-packages.sh
+
+      - name: Lint and run the shell tests
+        # bats-check rather than upstream's `test`: build-machinery-go
+        # attaches test-unit to that and hard-requires a Go toolchain,
+        # which has nothing to do with checking shell scripts. The version
+        # check in the vendored golang.mk runs at parse time, so it fires for
+        # any target; GO_REQUIRED_MIN_VERSION:= is its documented override.
+        run: make GO_REQUIRED_MIN_VERSION:= bats-check
+
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build for this runner and load it, so it can be tested
+        # Multi-platform builds cannot be --load'ed into the local docker, so
+        # the image that gets smoke-tested is the native one. The Dockerfile
+        # is FROM + COPY only, so the other platforms differ solely in their
+        # base layer -- nothing is compiled, and nothing needs emulating.
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --build-arg BASE="$PUBLIC_BASE" \
+            -f Dockerfile.overlay \
+            -t "$IMAGE_NAME:ci" \
+            --load .
+
+      - name: The collection scripts parse inside the image
+        run: |
+          docker run --rm --entrypoint /bin/bash "$IMAGE_NAME:ci" -c '
+            set -eu
+            n=0
+            for f in /usr/bin/gather*; do
+              [ -f "$f" ] || continue
+              bash -n "$f" || { echo "FAILED to parse: $f" >&2; exit 1; }
+              n=$((n + 1))
+            done
+            echo "parsed $n collection scripts"
+            [ "$n" -gt 0 ]
+          '
+
+      - name: The --since library works inside the image
+        run: |
+          docker run --rm --entrypoint /bin/bash "$IMAGE_NAME:ci" -c '
+            set -eu
+            test -f /usr/bin/since_common.sh
+            # shellcheck source=/dev/null
+            . /usr/bin/since_common.sh
+
+            # durations collapse exactly, not by truncation
+            [ "$(duration_to_node_logs_since 2h30m0s)" = "150m" ]
+            [ "$(duration_to_node_logs_since 500ms)" = "1s" ]
+
+            # a window produces a find predicate
+            MUST_GATHER_SINCE=30m0s get_since_cutoff
+            [ -n "${since_cutoff_epoch}" ]
+            since_find_predicate | grep -q "^-newermt @"
+
+            # and no window is a no-op
+            unset MUST_GATHER_SINCE
+            get_since_cutoff
+            [ -z "$(since_find_predicate)" ]
+
+            echo "in-image --since library OK"
+          '
+
+      - name: Work out the tags
+        # main           -> :latest and :main-<sha>
+        # release-4.18    -> :4.18 and :release-4.18
+        # v* tag          -> :<tag> and :latest
+        #
+        # A release branch deliberately does not move :latest. Pointing
+        # --image at :4.18 should get you the 4.18 collection scripts
+        # whatever has happened on main since.
+        id: tags
+        run: |
+          REPO="ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME"
+          REPO="$(echo "$REPO" | tr '[:upper:]' '[:lower:]')"
+          REF_NAME="${GITHUB_REF#refs/heads/}"
+          case "${GITHUB_REF}" in
+          refs/tags/v*)
+            TAGS="$REPO:${GITHUB_REF#refs/tags/},$REPO:latest"
+            ;;
+          refs/heads/release-*)
+            TAGS="$REPO:${REF_NAME#release-},$REPO:${REF_NAME}"
+            ;;
+          *)
+            TAGS="$REPO:latest,$REPO:main-${GITHUB_SHA::12}"
+            ;;
+          esac
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+          echo "pushing: $TAGS"
+
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build every platform and push
+        # Pull requests build and test but never publish.
+        if: github.event_name != 'pull_request'
+        run: |
+          docker buildx build \
+            --platform "$PLATFORMS" \
+            --build-arg BASE="$PUBLIC_BASE" \
+            -f Dockerfile.overlay \
+            $(echo "${{ steps.tags.outputs.tags }}" | tr "," "\n" | sed "s/^/--tag /" | tr "\n" " ") \
+            --push .
