@@ -93,3 +93,23 @@ $(TOOLS):
 		echo "falling back to downloading $@"; \
 		./hack/tools.sh $@; \
 	fi
+
+# Shell lint and tests without going through the build-machinery-go include.
+#
+# Upstream's `lint` and `test` targets do the same work, but the included
+# golang.mk attaches test-unit to `test` and hard-requires a Go toolchain, so
+# `make test` cannot run in an environment that only needs to check shell.
+# These names do not collide with upstream's or build-machinery's, and CI
+# uses them so that CI and a laptop run exactly the same thing.
+# depends on the bare tool names, which the $(TOOLS) rule above provides
+.PHONY: bats-lint
+bats-lint: shellcheck
+	find $(SCRIPT_DIRS) -type f -not -path '*/vendor/*' \
+		-exec grep -Eq '^#!/' {} \; -exec $(SHELLCHECK) -x {} +
+
+.PHONY: bats-test
+bats-test: bats
+	$(BATS) tests/*.bats
+
+.PHONY: bats-check
+bats-check: bats-lint bats-test

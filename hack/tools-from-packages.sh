@@ -102,6 +102,22 @@ link_tool() {
 	# Symlink rather than copy so the tool resolves its own installation
 	# root; bats in particular locates its libexec that way.
 	ln -sf "$target" "$LOCAL_BIN/$tool"
+
+	# Unpacking an rpm does not pull its dependencies, so a dynamically
+	# linked tool can land here and then fail at the point of use with a
+	# bare "cannot open shared object file". Catch that now and name the
+	# package to install, rather than letting it surface as a lint failure.
+	if ! "$LOCAL_BIN/$tool" --version >/dev/null 2>&1; then
+		local why
+		why="$("$LOCAL_BIN/$tool" --version 2>&1 | head -1)"
+		echo "ERROR: $tool was unpacked but will not run: ${why}" >&2
+		case "$why" in
+		*libnuma*) echo "       install the numactl-libs package" >&2 ;;
+		*"shared object"*) echo "       a runtime dependency of the package is missing" >&2 ;;
+		esac
+		return 1
+	fi
+
 	echo "OK: $tool -> $target"
 }
 

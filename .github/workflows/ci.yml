@@ -1,0 +1,130 @@
+# Build the must-gather container and check the collection scripts.
+#
+# Upstream's CI (.ci-operator.yaml, OWNERS, prow) does not run for this fork,
+# so this is what stands in for it.
+#
+# The lint and test job runs inside a Fedora container on purpose:
+# hack/tools-from-packages.sh gets bats, shellcheck and shfmt from the
+# distribution rather than downloading release binaries from GitHub, and that
+# needs dnf. It is the same path used locally, so CI and a laptop agree.
+#
+# The image is built against a *public* base so CI needs no registry
+# credentials. For real use you want the image your cluster actually runs --
+# see Dockerfile.overlay -- but for proving the overlay builds and the
+# scripts work inside it, the public base is equivalent.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  PUBLIC_BASE: quay.io/openshift/origin-must-gather:latest
+  IMAGE_NAME: better-gather
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - name: Install the bits the container lacks
+        # git is needed by actions/checkout and by the test helper's
+        # `git rev-parse --show-toplevel`; rpm/cpio by tools-from-packages;
+        # numactl-libs because Fedora's shellcheck binary links against it and
+        # unpacking an rpm does not pull its dependencies; jq because
+        # trim_jsonl_since uses it and the must-gather images ship it.
+        run: dnf -y install --setopt=install_weak_deps=False
+          git make findutils tar gzip diffutils cpio rpm gawk numactl-libs jq
+
+      - uses: actions/checkout@v4
+
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Bootstrap tooling from the distribution
+        run: ./hack/tools-from-packages.sh
+
+      - name: Lint and run the shell tests
+        # bats-check rather than upstream's `test`: build-machinery-go
+        # attaches test-unit to that and hard-requires a Go toolchain,
+        # which has nothing to do with checking shell scripts. The version
+        # check in the vendored golang.mk runs at parse time, so it fires for
+        # any target; GO_REQUIRED_MIN_VERSION:= is its documented override.
+        run: make GO_REQUIRED_MIN_VERSION:= bats-check
+
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the overlay image
+        run: |
+          docker build \
+            --build-arg BASE="$PUBLIC_BASE" \
+            -f Dockerfile.overlay \
+            -t "$IMAGE_NAME:ci" .
+
+      - name: The collection scripts parse inside the image
+        run: |
+          docker run --rm --entrypoint /bin/bash "$IMAGE_NAME:ci" -c '
+            set -eu
+            n=0
+            for f in /usr/bin/gather*; do
+              [ -f "$f" ] || continue
+              bash -n "$f" || { echo "FAILED to parse: $f" >&2; exit 1; }
+              n=$((n + 1))
+            done
+            echo "parsed $n collection scripts"
+            [ "$n" -gt 0 ]
+          '
+
+      - name: The --since library works inside the image
+        run: |
+          docker run --rm --entrypoint /bin/bash "$IMAGE_NAME:ci" -c '
+            set -eu
+            test -f /usr/bin/since_common.sh
+            # shellcheck source=/dev/null
+            . /usr/bin/since_common.sh
+
+            # durations collapse exactly, not by truncation
+            [ "$(duration_to_node_logs_since 2h30m0s)" = "150m" ]
+            [ "$(duration_to_node_logs_since 500ms)" = "1s" ]
+
+            # a window produces a find predicate
+            MUST_GATHER_SINCE=30m0s get_since_cutoff
+            [ -n "${since_cutoff_epoch}" ]
+            since_find_predicate | grep -q "^-newermt @"
+
+            # and no window is a no-op
+            unset MUST_GATHER_SINCE
+            get_since_cutoff
+            [ -z "$(since_find_predicate)" ]
+
+            echo "in-image --since library OK"
+          '
+
+      - name: Log in to ghcr.io
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        # Only on a tag. Nothing is published by an ordinary push or PR.
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          REPO="ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME"
+          docker tag "$IMAGE_NAME:ci" "$REPO:$TAG"
+          docker tag "$IMAGE_NAME:ci" "$REPO:latest"
+          docker push "$REPO:$TAG"
+          docker push "$REPO:latest"
