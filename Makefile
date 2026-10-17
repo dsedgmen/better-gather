@@ -68,3 +68,34 @@ tools:
 
 $(TOOLS):
 	./hack/tools.sh $@
+
+# --- better-gather: shell lint and tests -----------------------------------
+# Self-contained and BG_-prefixed so it cannot collide with upstream's
+# variables, which differ between release branches. bats-check rather than
+# `test`: on branches that vendor build-machinery-go, `test` has test-unit
+# attached to it and hard-requires a Go toolchain.
+BG_LOCALBIN ?= $(shell pwd)/tmp/bin
+BG_BATS ?= $(BG_LOCALBIN)/bats
+BG_SHELLCHECK ?= $(BG_LOCALBIN)/shellcheck
+BG_SCRIPT_DIRS := collection-scripts/ hack/ tests/
+BG_BASE ?= quay.io/openshift/origin-must-gather:latest
+BG_IMAGE ?= better-gather:latest
+
+$(BG_LOCALBIN)/%:
+	./hack/tools-from-packages.sh $*
+
+.PHONY: bats-lint
+bats-lint: $(BG_SHELLCHECK)
+	find $(BG_SCRIPT_DIRS) -type f -not -path '*/vendor/*' \
+		-exec grep -Eq '^#!.*/(env +)?(ba|da|k|z)?sh' {} \; -exec $(BG_SHELLCHECK) -x {} +
+
+.PHONY: bats-test
+bats-test: $(BG_BATS)
+	$(BG_BATS) tests/*.bats
+
+.PHONY: bats-check
+bats-check: bats-lint bats-test
+
+.PHONY: image-overlay
+image-overlay:
+	podman build --build-arg BASE=$(BG_BASE) -t $(BG_IMAGE) -f Dockerfile.overlay .
