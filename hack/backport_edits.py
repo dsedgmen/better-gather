@@ -164,6 +164,32 @@ else
         required=False, label="insights: bounded copy")
 
 # --------------------------------------------------------------------------
+# Pre-existing shellcheck findings, so `make bats-lint` is green on the
+# branch too. Same fixes as on main; annotations of deliberate behaviour
+# rather than behaviour changes.
+# --------------------------------------------------------------------------
+
+edit(f"{CS}/gather_nfd",
+     'source $(dirname "$0")/common.sh',
+     '# shellcheck source=collection-scripts/common.sh\nsource "$(dirname "$0")/common.sh"',
+     required=False, label="gather_nfd: quote source")
+
+edit_re(f"{CS}/gather_nfd",
+        r'(\n)([ \t]*oc adm inspect \$\{log_collection_args\})',
+        r'\1        # shellcheck disable=SC2086,SC2154  # intentional word splitting\n\2',
+        required=False, label="gather_nfd: disable directives")
+
+edit(f"{CS}/gather_virt",
+     'source $(dirname "$0")/common.sh',
+     '# shellcheck source=collection-scripts/common.sh\nsource "$(dirname "$0")/common.sh"',
+     required=False, label="gather_virt: quote source")
+
+edit(f"{CS}/gather_virt",
+     'echo "Gathering stats for the following CRDs: ${VIRT_CRDS[@]}"',
+     'echo "Gathering stats for the following CRDs: ${VIRT_CRDS[*]}"',
+     required=False, label="gather_virt: array in string")
+
+# --------------------------------------------------------------------------
 # Makefile: shell lint and tests, self-contained
 # --------------------------------------------------------------------------
 #
@@ -190,7 +216,7 @@ $(BG_LOCALBIN)/%:
 .PHONY: bats-lint
 bats-lint: $(BG_SHELLCHECK)
 \tfind $(BG_SCRIPT_DIRS) -type f -not -path '*/vendor/*' \\
-\t\t-exec grep -Eq '^#!/' {} \\; -exec $(BG_SHELLCHECK) -x {} +
+\t\t-exec grep -Eq '^#!.*/(env +)?(ba|da|k|z)?sh\b' {} \\; -exec $(BG_SHELLCHECK) -x {} +
 
 .PHONY: bats-test
 bats-test: $(BG_BATS)

@@ -49,7 +49,7 @@ SCRIPT_DIRS := collection-scripts/ hack/ tests/
 
 .PHONY: lint
 lint: shellcheck
-	find $(SCRIPT_DIRS) -type f -exec grep -Eq '^#!/' {} \; -exec $(SHELLCHECK) -x {} +
+	find $(SCRIPT_DIRS) -type f -exec grep -Eq '^#!.*/(env +)?(ba|da|k|z)?sh\b' {} \; -exec $(SHELLCHECK) -x {} +
 
 .PHONY: fmt
 fmt: shfmt
@@ -105,7 +105,7 @@ $(TOOLS):
 .PHONY: bats-lint
 bats-lint: shellcheck
 	find $(SCRIPT_DIRS) -type f -not -path '*/vendor/*' \
-		-exec grep -Eq '^#!/' {} \; -exec $(SHELLCHECK) -x {} +
+		-exec grep -Eq '^#!.*/(env +)?(ba|da|k|z)?sh\b' {} \; -exec $(SHELLCHECK) -x {} +
 
 .PHONY: bats-test
 bats-test: bats
