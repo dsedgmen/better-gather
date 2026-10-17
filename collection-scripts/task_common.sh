@@ -104,9 +104,18 @@ _task_exec() {
 	_task_record "${name}" "${state}" "${rc}" "${elapsed}" "${detail}"
 }
 
-# Append one result and print progress. Serialised with flock where it is
-# available, so that two tasks finishing at once cannot both claim the same
-# position in the count.
+# Append one result and print progress.
+#
+# Serialised with flock where it works, so that two tasks finishing at the
+# same moment cannot both claim the same position in the count. flock is in
+# util-linux and is present in all three must-gather images, but this does
+# not depend on that: if it is missing, or if the call itself fails, the
+# record is written directly instead.
+#
+# Whether the record landed is checked by looking for it, not by trusting
+# flock's exit status. Losing a result silently would be much worse than a
+# duplicated number in the progress column -- the summary would under-count
+# and the drift warning would fire for the wrong reason.
 _task_record() {
 	local name="$1" state="$2" rc="$3" elapsed="$4" detail="$5"
 
@@ -114,8 +123,10 @@ _task_record() {
 		flock "${TASK_RESULTS}" bash -c \
 			"$(declare -f _task_emit); _task_emit \"\$@\"" _ \
 			"${TASK_RESULTS}" "${task_total}" "${name}" "${state}" \
-			"${rc}" "${elapsed}" "${detail}"
-	else
+			"${rc}" "${elapsed}" "${detail}" 2>/dev/null || true
+	fi
+
+	if ! grep -qF "${name}"$'\t' "${TASK_RESULTS}" 2>/dev/null; then
 		_task_emit "${TASK_RESULTS}" "${task_total}" "${name}" "${state}" \
 			"${rc}" "${elapsed}" "${detail}"
 	fi

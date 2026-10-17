@@ -340,3 +340,64 @@ EOF"
 	assert_success
 	assert_output --partial ":4.18"
 }
+
+# =============================================================================
+# Recording a result must not depend on flock working
+# =============================================================================
+
+@test "results still land when flock is missing entirely" {
+	# A symlink farm of the real PATH with flock removed, so everything
+	# else the library needs is still present.
+	mkdir -p "$TEST_TMPDIR/nf" "$TEST_TMPDIR/mg1"
+	local d f
+	for d in /usr/bin /bin; do
+		[ -d "$d" ] || continue
+		for f in "$d"/*; do ln -sf "$f" "$TEST_TMPDIR/nf/" 2>/dev/null || true; done
+	done
+	rm -f "$TEST_TMPDIR/nf/flock"
+
+	TASK_BASE_PATH="$TEST_TMPDIR/mg1" PATH="$TEST_TMPDIR/nf" \
+		run "$BATS_TEST_DIRNAME/fixtures/task_scenario.sh" "$SCRIPT_DIR/task_common.sh"
+	assert_success
+	assert_output --partial "RECORDED=3"
+}
+
+@test "results still land when flock exists but fails" {
+	# Found by stubbing flock: the code took the flock branch, every call
+	# exited 127, and every result was silently lost -- no records, no
+	# summary, and nothing to say anything had gone wrong.
+	mkdir -p "$TEST_TMPDIR/bf" "$TEST_TMPDIR/mg2"
+	printf '#!/bin/sh\nexit 127\n' >"$TEST_TMPDIR/bf/flock"
+	chmod +x "$TEST_TMPDIR/bf/flock"
+
+	TASK_BASE_PATH="$TEST_TMPDIR/mg2" PATH="$TEST_TMPDIR/bf:$PATH" \
+		run "$BATS_TEST_DIRNAME/fixtures/task_scenario.sh" "$SCRIPT_DIR/task_common.sh"
+	assert_success
+	assert_output --partial "RECORDED=3"
+}
+
+@test "a result is recorded exactly once when flock works" {
+	# The fallback checks whether the record landed rather than trusting
+	# flock's exit status, so it must not double-write on the happy path.
+	tasks '
+		task_plan solo
+		task_run solo bash -c "echo data"
+		task_wait
+		wc -l <"$TASK_RESULTS"
+	'
+	assert_success
+	assert_output --partial "1"
+}
+
+@test "positions are unique under heavy concurrency" {
+	# 40 tasks finishing together. Without serialisation several claim the
+	# same slot, which is how the need for flock showed up.
+	tasks '
+		task_plan $(seq -s" " 1 40 | sed "s/[0-9]*/t&/g") >/dev/null
+		for i in $(seq 1 40); do task_run "t$i" true; done
+		task_wait
+	'
+	assert_success
+	run bash -c "printf '%s' '$output' | grep -oE '\[ *[0-9]+/40\]' | grep -oE '[0-9]+/' | tr -d '/' | sort -n | uniq -d | wc -l"
+	assert_output "0"
+}
