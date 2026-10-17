@@ -98,10 +98,11 @@ EOF
 	echo "  committed $(git rev-parse --short=8 HEAD)"
 }
 
+ORIGINAL_BRANCH=""
+
 main() {
-	local original
-	original="$(git rev-parse --abbrev-ref HEAD)"
-	trap 'git checkout -q "${original}" 2>/dev/null || true' EXIT
+	ORIGINAL_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+	trap 'git checkout -q "${ORIGINAL_BRANCH:-main}" 2>/dev/null || true' EXIT
 
 	if [ "$#" -eq 0 ]; then
 		echo "usage: ${BASH_SOURCE[0]##*/} <version>..." >&2
