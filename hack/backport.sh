@@ -38,6 +38,7 @@ OURS=(
 	hack/sync-since-lib.sh
 	hack/try-on-cluster.sh
 	hack/backport.sh
+	hack/backport_edits.py
 	tests/bats_assert_fallback.bash
 	tests/since_common.bats
 	tests/test_helper.bash
