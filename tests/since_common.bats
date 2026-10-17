@@ -513,3 +513,36 @@ another plain line"
 		false
 	}
 }
+
+@test "library functions survive into an xargs/sh -c grandchild" {
+	# Collection scripts fan out with `xargs ... sh -c`, where a function from
+	# the parent shell is not visible. Without export -f the failure is quiet
+	# and expensive: $(since_find_predicate) becomes empty, find runs
+	# unfiltered, and the window is silently ignored. CNV's gather_vms_details
+	# collected a 27-minute-old QEMU log under --since 5m because of this.
+	run bash -c "
+		export MUST_GATHER_SINCE_TIME='2026-10-16T12:00:00Z'
+		source \"$SCRIPT_DIR/since_common.sh\"
+		get_since_cutoff
+		sh -c 'since_find_predicate'
+	"
+	assert_success
+	assert_output "-newermt @1792152000"
+}
+
+@test "every public library function is exported" {
+	run bash -c "
+		source \"$SCRIPT_DIR/since_common.sh\"
+		missing=''
+		for f in duration_to_seconds duration_to_node_logs_since get_since_cutoff \
+			since_window_requested since_find_predicate filename_timestamp_epoch \
+			filter_names_since copy_pod_dir_since pod_tar_dirs_since \
+			trim_jsonl_since since_report since_report_header; do
+			declare -F \"\$f\" >/dev/null || { missing=\"\$missing \$f(undefined)\"; continue; }
+			[[ \$(declare -pF \"\$f\") == *' -fx '* ]] || missing=\"\$missing \$f\"
+		done
+		echo \"[\$missing]\"
+	"
+	assert_success
+	assert_output "[]"
+}

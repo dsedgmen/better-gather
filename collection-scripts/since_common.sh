@@ -391,3 +391,22 @@ since_report_header() {
 }
 
 export SINCE_REPORT_PATH
+
+# Export the functions as well as the variables.
+#
+# Collection scripts routinely fan out with `xargs ... sh -c '...'`, and a
+# function defined in the parent is not visible in that grandchild. The
+# failure is quiet and expensive: `$(since_find_predicate)` becomes the empty
+# string, the find runs unfiltered, and the window is silently ignored. CNV's
+# gather_vms_details does exactly this, and ODF's utils.sh already exports its
+# own shared functions for the same reason.
+#
+# export -f is a bashism; skip it under a shell that lacks it rather than
+# erroring out.
+if [ -n "${BASH_VERSION:-}" ]; then
+	export -f duration_to_seconds duration_to_node_logs_since get_since_cutoff
+	export -f since_window_requested since_find_predicate
+	export -f filename_timestamp_epoch filter_names_since
+	export -f copy_pod_dir_since pod_tar_dirs_since trim_jsonl_since
+	export -f since_report since_report_header
+fi
