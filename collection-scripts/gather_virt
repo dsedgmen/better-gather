@@ -1,6 +1,7 @@
 #!/bin/bash
 
-source $(dirname "$0")/common.sh
+# shellcheck source=collection-scripts/common.sh
+source "$(dirname "$0")/common.sh"
 BASE_COLLECTION_PATH="must-gather"
 VIRT_LOG_PATH="${BASE_COLLECTION_PATH}/virt_info"
 
@@ -20,7 +21,7 @@ declare -a VIRT_CRDS=(
   )
 
 function get_crd_stats() {
-  echo "Gathering stats for the following CRDs: ${VIRT_CRDS[@]}"
+  echo "Gathering stats for the following CRDs: ${VIRT_CRDS[*]}"
   mkdir -p "${VIRT_LOG_PATH}/crd"
 	for CRD in "${VIRT_CRDS[@]}";
   do
