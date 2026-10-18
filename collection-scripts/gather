@@ -26,6 +26,12 @@ all_tasks=(
 	machineconfig_ondisk machineconfigdaemon_termination_logs vsphere ppc
 	osus istio aro
 )
+# Compression is part of the run only when REDUCE_LOGS asks for it, so it
+# joins the plan on the same terms as everything else rather than happening
+# silently after the summary.
+if [ "${compress_after_gather}" = "true" ]; then
+	all_tasks+=(compress)
+fi
 task_plan "${all_tasks[@]}"
 
 # Named resource list, eg. ns/openshift-config
@@ -193,13 +199,16 @@ task_wait
 task_run aro /usr/bin/gather_aro
 task_wait
 
-task_summary || true
-
-# Optionally compress collected log files before the sidecar copies them out.
-# Enabled via REDUCE_LOGS=compress_logs.
+# Compress collected log files before the sidecar copies them out, if
+# REDUCE_LOGS asked for it. Run as a task so that gzipping several hundred
+# megabytes shows up as progress rather than as a pause after the summary
+# with nothing to say whether it is working.
 if [ "${compress_after_gather}" = "true" ]; then
-	compress_logs
+	task_run compress compress_logs
+	task_wait
 fi
+
+task_summary || true
 
 # force disk flush to ensure that all data gathered is accessible in the copy container
 sync

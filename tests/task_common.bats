@@ -500,3 +500,57 @@ EOF"
 	# default heartbeat is 30s; anything near that means an orphaned sleep
 	[ "$output" -lt 5 ]
 }
+
+# =============================================================================
+# Compression as a tracked task
+# =============================================================================
+
+@test "compression shows as progress rather than silence after the summary" {
+	# REDUCE_LOGS=compress_logs gzips every collected log over 10MB. On a
+	# large archive that takes a while, and it used to run after the summary
+	# with nothing printed but its own two lines.
+	run bash -c "
+		export TASK_BASE_PATH='$TEST_TMPDIR/mgc' BASE_COLLECTION_PATH='$TEST_TMPDIR/mgc'
+		mkdir -p \"\$TASK_BASE_PATH\"
+		dd if=/dev/zero of=\"\$TASK_BASE_PATH/big.log\" bs=1M count=11 status=none
+		echo small >\"\$TASK_BASE_PATH/small.log\"
+		source '$SCRIPT_DIR/common.sh'
+		source '$SCRIPT_DIR/task_common.sh'
+		task_plan compress >/dev/null
+		task_run compress compress_logs \"\$TASK_BASE_PATH\"
+		task_wait
+		ls \"\$TASK_BASE_PATH\" | grep -E '^(big|small)'
+	"
+	assert_success
+	assert_output --partial "[1/1] compress"
+	# over the 10MB threshold is compressed, under it is left alone
+	assert_output --partial "big.log.gz"
+	assert_output --partial "small.log"
+	refute_output --partial "big.log
+"
+}
+
+@test "compression's own chatter stays out of the shared stream" {
+	run bash -c "
+		export TASK_BASE_PATH='$TEST_TMPDIR/mgc2' BASE_COLLECTION_PATH='$TEST_TMPDIR/mgc2'
+		mkdir -p \"\$TASK_BASE_PATH\"
+		source '$SCRIPT_DIR/common.sh'
+		source '$SCRIPT_DIR/task_common.sh'
+		task_plan compress >/dev/null
+		task_run compress compress_logs \"\$TASK_BASE_PATH\"
+		task_wait
+		echo '--- task log ---'
+		cat \"\$TASK_LOG_DIR/compress.log\"
+	"
+	assert_success
+	assert_output --partial "Compressing collected logs"
+	# it appears in the task's own log, not twice
+	run bash -c "printf '%s' '$output' | grep -c 'Compressing collected logs'"
+	assert_output "1"
+}
+
+@test "compression only joins the plan when REDUCE_LOGS asks for it" {
+	run grep -A3 'compress_after_gather.*= .true.' "$SCRIPT_DIR/gather"
+	assert_success
+	assert_output --partial "all_tasks+=(compress)"
+}
