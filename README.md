@@ -175,18 +175,53 @@ cluster needs a pull secret — or one of the two ways round it below.
 
 ### With a pull secret
 
-The token must be a **classic** personal access token. GitHub's own
-documentation is explicit: *"GitHub Packages only supports authentication
-using a personal access token (classic)."* Fine-grained tokens are not
-accepted by ghcr.io at all, and have no `read:packages` scope to select —
-if you are looking at a scope list without it, you are on the fine-grained
-page.
+`--run-namespace` needs an **already privileged** namespace — the flag's own
+help says so, and it matters more than it sounds. When `oc` creates its own
+temporary namespace it also creates a ClusterRoleBinding granting
+`cluster-admin` to that namespace's `default` ServiceAccount, and labels the
+namespace for privileged pod security. With `--run-namespace` it does
+neither: it only looks the namespace up
+([`mustgather.go`](https://github.com/openshift/oc/blob/master/pkg/cli/admin/mustgather/mustgather.go),
+`getNamespace`). A plain `oc create namespace` therefore fails partway
+through collection with:
+
+```
+Error from server (Forbidden): csistoragecapacities.storage.k8s.io is forbidden:
+User "system:serviceaccount:must-gather-run:default" cannot list resource ...
+```
+
+Create it with the same labels and binding `oc` would have made:
+
+```console
+$ cat <<'EOF' | oc apply -f -
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: must-gather-run
+  labels:
+    openshift.io/run-level: "0"
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+    security.openshift.io/scc.podSecurityLabelSync: "false"
+  annotations:
+    openshift.io/node-selector: ""
+EOF
+
+$ oc adm policy add-cluster-role-to-user cluster-admin -z default -n must-gather-run
+```
+
+The token for the pull secret must be a **classic** personal access token.
+GitHub's own documentation is explicit: *"GitHub Packages only supports
+authentication using a personal access token (classic)."* Fine-grained
+tokens are not accepted by ghcr.io at all, and have no `read:packages` scope
+to select — if you are looking at a scope list without it, you are on the
+fine-grained page.
 
 Settings → Developer settings → Personal access tokens → **Tokens (classic)**
 → Generate new token (classic) → tick **`read:packages`**.
 
 ```console
-$ oc create namespace must-gather-run
 $ oc create secret docker-registry ghcr \
     --docker-server=ghcr.io \
     --docker-username=dsedgmen \
@@ -200,8 +235,8 @@ $ oc adm must-gather \
     --since 30m
 ```
 
-`--run-namespace` matters: without it the pod runs in a fresh temporary
-namespace that has no pull secret.
+Verified on a 4.18 cluster: with the namespace made this way a run completes
+with no Forbidden errors; with a bare `oc create namespace` it does not.
 
 ### Without a token at all
 
