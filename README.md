@@ -171,15 +171,26 @@ A release branch deliberately does not move `:latest`, so `--image …:4.18`
 keeps getting the 4.18 collection scripts whatever happens on main.
 
 **The packages are private**, inheriting the repository's visibility, so a
-cluster needs a pull secret. Create one in the namespace must-gather will run
-in, with a PAT that has `read:packages`:
+cluster needs a pull secret — or one of the two ways round it below.
+
+### With a pull secret
+
+The token must be a **classic** personal access token. GitHub's own
+documentation is explicit: *"GitHub Packages only supports authentication
+using a personal access token (classic)."* Fine-grained tokens are not
+accepted by ghcr.io at all, and have no `read:packages` scope to select —
+if you are looking at a scope list without it, you are on the fine-grained
+page.
+
+Settings → Developer settings → Personal access tokens → **Tokens (classic)**
+→ Generate new token (classic) → tick **`read:packages`**.
 
 ```console
 $ oc create namespace must-gather-run
 $ oc create secret docker-registry ghcr \
     --docker-server=ghcr.io \
     --docker-username=dsedgmen \
-    --docker-password=<PAT with read:packages> \
+    --docker-password=<classic PAT with read:packages> \
     -n must-gather-run
 $ oc secrets link default ghcr --for=pull -n must-gather-run
 
@@ -192,9 +203,27 @@ $ oc adm must-gather \
 `--run-namespace` matters: without it the pod runs in a fresh temporary
 namespace that has no pull secret.
 
-To avoid the secret entirely, make the package public in the repository's
-package settings — note that publishes the collection scripts, since they are
-in the image layers.
+### Without a token at all
+
+**Make the package public** — repository → Packages → the package → Package
+settings → Change visibility. Any cluster can then pull it with no setup.
+The repository stays private; only the image becomes readable, which does
+publish the collection scripts, since they are in the image layers.
+
+**Or build straight into the cluster's own registry**, which needs no GitHub
+credentials and no external pull at all:
+
+```console
+$ oc new-project better-gather-build
+$ oc new-build --name mg --binary --strategy=docker
+$ oc start-build mg --from-dir=. --follow
+$ oc adm must-gather \
+    --run-namespace better-gather-build \
+    --image=image-registry.openshift-image-registry.svc:5000/better-gather-build/mg:latest
+```
+
+This is how the changes here were tested; see also `hack/try-on-cluster.sh`,
+which needs neither a build nor a registry.
 
 ## Release branches
 
