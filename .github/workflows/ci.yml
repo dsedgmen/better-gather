@@ -17,7 +17,7 @@ name: ci
 
 on:
   push:
-    branches: [main, 'release-*']
+    branches: ['**']
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -120,13 +120,16 @@ jobs:
           '
 
       - name: Work out the tags
-        # main           -> :latest and :main-<sha>
-        # release-4.18    -> :4.18 and :release-4.18
-        # v* tag          -> :<tag> and :latest
+        # main            -> :latest and :main-<sha>
+        # release-4.18     -> :4.18 and :release-4.18
+        # any other branch -> :branch-<name>
+        # v* tag           -> :<tag> and :latest
         #
-        # A release branch deliberately does not move :latest. Pointing
-        # --image at :4.18 should get you the 4.18 collection scripts
-        # whatever has happened on main since.
+        # Only main moves :latest. A release branch publishes its version so
+        # --image …:4.18 keeps getting the 4.18 scripts, and any other branch
+        # publishes under its own name so a change can be tried on a cluster
+        # before it is merged. Slashes are not legal in a tag, so
+        # feature/sos-style-progress becomes :branch-feature-sos-style-progress.
         id: tags
         run: |
           REPO="ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME"
@@ -139,8 +142,11 @@ jobs:
           refs/heads/release-*)
             TAGS="$REPO:${REF_NAME#release-},$REPO:${REF_NAME}"
             ;;
-          *)
+          refs/heads/main)
             TAGS="$REPO:latest,$REPO:main-${GITHUB_SHA::12}"
+            ;;
+          *)
+            TAGS="$REPO:branch-$(echo "$REF_NAME" | tr '/' '-')"
             ;;
           esac
           echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
