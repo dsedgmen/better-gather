@@ -14,7 +14,7 @@ load test_helper
 
 @test "duration_to_seconds sums every component of a Go duration" {
 	run bash -c "
-		source \"$SCRIPT_DIR/common.sh\"
+		source \"$SCRIPT_DIR/since_common.sh\"
 		duration_to_seconds '2h30m0s'
 	"
 	assert_success
@@ -23,7 +23,7 @@ load test_helper
 
 @test "duration_to_seconds handles single components" {
 	run bash -c "
-		source \"$SCRIPT_DIR/common.sh\"
+		source \"$SCRIPT_DIR/since_common.sh\"
 		echo \"\$(duration_to_seconds '30m0s') \$(duration_to_seconds '45s') \$(duration_to_seconds '1h0m0s') \$(duration_to_seconds '2d0h0m0s')\"
 	"
 	assert_success
@@ -32,7 +32,7 @@ load test_helper
 
 @test "duration_to_seconds does not mistake the m of ms for minutes" {
 	run bash -c "
-		source \"$SCRIPT_DIR/common.sh\"
+		source \"$SCRIPT_DIR/since_common.sh\"
 		duration_to_seconds '500ms'
 	"
 	assert_success
@@ -41,7 +41,7 @@ load test_helper
 
 @test "duration_to_seconds truncates fractional units" {
 	run bash -c "
-		source \"$SCRIPT_DIR/common.sh\"
+		source \"$SCRIPT_DIR/since_common.sh\"
 		duration_to_seconds '1.5s'
 	"
 	assert_success
@@ -50,7 +50,7 @@ load test_helper
 
 @test "duration_to_seconds returns 0 for junk" {
 	run bash -c "
-		source \"$SCRIPT_DIR/common.sh\"
+		source \"$SCRIPT_DIR/since_common.sh\"
 		echo \"[\$(duration_to_seconds 'soon')][\$(duration_to_seconds '')]\"
 	"
 	assert_success
@@ -63,7 +63,7 @@ load test_helper
 
 @test "duration_to_node_logs_since collapses durations without losing time" {
 	run bash -c "
-		source \"$SCRIPT_DIR/common.sh\"
+		source \"$SCRIPT_DIR/since_common.sh\"
 		for d in 30m0s 2h30m0s 1h0m0s 90m0s 36h0m0s 45s 168h0m0s 1h0m30s; do
 			printf '%s=%s ' \"\$d\" \"\$(duration_to_node_logs_since \"\$d\")\"
 		done
@@ -82,7 +82,7 @@ load test_helper
 
 @test "duration_to_node_logs_since round-trips to the same number of seconds" {
 	run bash -c "
-		source \"$SCRIPT_DIR/common.sh\"
+		source \"$SCRIPT_DIR/since_common.sh\"
 		for d in 30m0s 2h30m0s 90m0s 36h0m0s 1h0m30s 168h0m0s; do
 			a=\$(duration_to_seconds \"\$d\")
 			b=\$(duration_to_seconds \"\$(duration_to_node_logs_since \"\$d\")\")
@@ -98,7 +98,7 @@ load test_helper
 	# node-logs has no unit finer than the second. Passing '500ms' through
 	# would be read as 500 minutes.
 	run bash -c "
-		source \"$SCRIPT_DIR/common.sh\"
+		source \"$SCRIPT_DIR/since_common.sh\"
 		duration_to_node_logs_since '500ms'
 	"
 	assert_success
@@ -112,7 +112,7 @@ load test_helper
 @test "get_since_cutoff resolves MUST_GATHER_SINCE to an absolute instant" {
 	run bash -c "
 		export MUST_GATHER_SINCE='1h0m0s'
-		source \"$SCRIPT_DIR/common.sh\"
+		source \"$SCRIPT_DIR/since_common.sh\"
 		get_since_cutoff
 		now=\$(date -u +%s)
 		delta=\$((now - since_cutoff_epoch))
@@ -126,7 +126,7 @@ load test_helper
 @test "get_since_cutoff resolves MUST_GATHER_SINCE_TIME exactly" {
 	run bash -c "
 		export MUST_GATHER_SINCE_TIME='2026-10-16T09:00:00Z'
-		source \"$SCRIPT_DIR/common.sh\"
+		source \"$SCRIPT_DIR/since_common.sh\"
 		get_since_cutoff
 		echo \"\$since_cutoff_rfc3339\"
 	"
@@ -138,7 +138,7 @@ load test_helper
 	run bash -c "
 		export MUST_GATHER_SINCE='8h'
 		export MUST_GATHER_SINCE_TIME='2026-10-16T09:00:00Z'
-		source \"$SCRIPT_DIR/common.sh\"
+		source \"$SCRIPT_DIR/since_common.sh\"
 		get_since_cutoff
 		echo \"\$since_cutoff_rfc3339\"
 	"
@@ -149,7 +149,7 @@ load test_helper
 @test "get_since_cutoff leaves the cutoff empty when no window was requested" {
 	run bash -c "
 		unset MUST_GATHER_SINCE MUST_GATHER_SINCE_TIME
-		source \"$SCRIPT_DIR/common.sh\"
+		source \"$SCRIPT_DIR/since_common.sh\"
 		get_since_cutoff
 		echo \"[\$since_cutoff_epoch][\$since_cutoff_rfc3339]\"
 	"
