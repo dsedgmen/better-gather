@@ -401,3 +401,102 @@ EOF"
 	run bash -c "printf '%s' '$output' | grep -oE '\[ *[0-9]+/40\]' | grep -oE '[0-9]+/' | tr -d '/' | sort -n | uniq -d | wc -l"
 	assert_output "0"
 }
+
+# =============================================================================
+# Heartbeat: saying what is still running
+# =============================================================================
+
+@test "a slow task does not leave the run silent" {
+	# oc's own disk-usage checker prints every five seconds regardless, so
+	# without this a long task looks like a hang: minutes of checker output
+	# and nothing else.
+	tasks '
+		export TASK_HEARTBEAT=1
+		task_plan quick slow >/dev/null
+		task_run quick true
+		task_run slow bash -c "sleep 3; echo data"
+		task_wait
+	'
+	assert_success
+	assert_output --partial "still running: slow"
+	assert_output --partial "/2 done"
+}
+
+@test "the heartbeat names only tasks that have not finished" {
+	tasks '
+		export TASK_HEARTBEAT=1
+		task_plan a b >/dev/null
+		task_run a true
+		task_run b bash -c "sleep 3; echo data"
+		task_wait
+	'
+	assert_success
+	run bash -c "printf '%s' '$output' | grep 'still running' | grep -c ' a '"
+	assert_output "0"
+}
+
+@test "the heartbeat can be turned off" {
+	tasks '
+		export TASK_HEARTBEAT=0
+		task_plan slow >/dev/null
+		task_run slow bash -c "sleep 2; echo data"
+		task_wait
+	'
+	assert_success
+	refute_output --partial "still running"
+}
+
+@test "the heartbeat does not outlive task_wait" {
+	# A leaked background loop would keep printing into the pod log after
+	# collection had finished.
+	tasks '
+		export TASK_HEARTBEAT=1
+		task_plan a >/dev/null
+		task_run a bash -c "sleep 2; echo data"
+		task_wait
+		before=$(jobs -rp | wc -l)
+		sleep 2
+		echo "running jobs after wait: $(jobs -rp | wc -l)"
+	'
+	assert_success
+	assert_output --partial "running jobs after wait: 0"
+}
+
+# =============================================================================
+# A clean copy of the progress for the archive
+# =============================================================================
+
+@test "progress is also written to a log without oc's noise in it" {
+	tasks '
+		task_plan a b >/dev/null
+		task_run a bash -c "echo data"
+		task_run b bash -c "echo data"
+		task_wait
+		echo "--- file ---"
+		cat "$TASK_PROGRESS_LOG"
+	'
+	assert_success
+	run bash -c "printf '%s' '$output' | sed -n '/--- file ---/,\$p' | grep -c '^  \['"
+	assert_output "2"
+}
+
+@test "task_wait returns promptly, leaving no sleep holding the log open" {
+	# Killing the heartbeat does not kill a `sleep` it is blocked in, and
+	# that orphan keeps the container's stdout open after collection has
+	# finished. With the default 30s interval it stalled anything reading
+	# the log to EOF for half a minute.
+	run timeout 20 bash -c "
+		export TASK_BASE_PATH='$TEST_TMPDIR/mgq'
+		mkdir -p \"\$TASK_BASE_PATH\"
+		source '$SCRIPT_DIR/task_common.sh'
+		start=\$(date +%s)
+		task_plan a >/dev/null
+		task_run a true
+		task_wait
+		echo \"waited=\$(( \$(date +%s) - start ))\"
+	"
+	assert_success
+	run bash -c "printf '%s' '$output' | sed -n 's/.*waited=\([0-9]*\).*/\1/p'"
+	# default heartbeat is 30s; anything near that means an orphaned sleep
+	[ "$output" -lt 5 ]
+}

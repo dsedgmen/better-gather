@@ -32,6 +32,19 @@
 TASK_BASE_PATH="${TASK_BASE_PATH:-${BASE_COLLECTION_PATH:-/must-gather}}"
 TASK_LOG_DIR="${TASK_LOG_DIR:-${TASK_BASE_PATH}/task-logs}"
 TASK_RESULTS="${TASK_RESULTS:-${TASK_BASE_PATH}/task-results.tsv}"
+TASK_STARTED="${TASK_STARTED:-${TASK_BASE_PATH}/task-started.tsv}"
+
+# A clean copy of the progress, without oc's disk-usage checker interleaved
+# into it. oc starts that checker as a sibling process writing to the same
+# container stdout every five seconds, so the live stream cannot be cleaned
+# up from in here -- but the archive can have a readable record.
+TASK_PROGRESS_LOG="${TASK_PROGRESS_LOG:-${TASK_BASE_PATH}/gather-progress.log}"
+
+# How often to say what is still running, in seconds. During a long task
+# there is otherwise nothing but the checker's output for minutes at a time,
+# which reads as though the gather has hung.
+TASK_HEARTBEAT="${TASK_HEARTBEAT:-30}"
+TASK_STOP="${TASK_STOP:-${TASK_BASE_PATH}/.task-stop}"
 
 # Patterns a collection script uses to say "the thing I collect is not here".
 # Matching one of these with a zero exit means the task ran fine and had
@@ -50,6 +63,9 @@ task_plan() {
 
 	mkdir -p "${TASK_LOG_DIR}"
 	: >"${TASK_RESULTS}"
+	: >"${TASK_STARTED}"
+	: >"${TASK_PROGRESS_LOG}"
+	rm -f "${TASK_STOP}"
 
 	echo
 	echo "Collecting with ${task_total} task(s)."
@@ -79,6 +95,7 @@ _task_exec() {
 	local start rc elapsed state detail=""
 
 	start="$(date -u +%s)"
+	printf '%s\t%s\n' "${name}" "${start}" >>"${TASK_STARTED}" 2>/dev/null || true
 	"$@" >"${log}" 2>&1
 	rc=$?
 	elapsed=$(($(date -u +%s) - start))
@@ -134,21 +151,77 @@ _task_record() {
 
 _task_emit() {
 	local results="$1" total="$2" name="$3" state="$4" rc="$5" elapsed="$6" detail="$7"
-	local position width
+	local position width line
 
 	printf '%s\t%s\t%s\t%s\t%s\n' \
 		"${name}" "${state}" "${rc}" "${elapsed}" "${detail}" >>"${results}"
 
 	position="$(wc -l <"${results}" | tr -d '[:space:]')"
 	width="${#total}"
-	printf '  [%*d/%d] %-42s %-7s %5ds\n' \
-		"${width}" "${position}" "${total}" "${name}" "${state}" "${elapsed}"
+	line="$(printf '  [%*d/%d] %-42s %-7s %5ds' \
+		"${width}" "${position}" "${total}" "${name}" "${state}" "${elapsed}")"
+	printf '%s\n' "${line}"
+	printf '%s\n' "${line}" >>"${TASK_PROGRESS_LOG}" 2>/dev/null || true
 }
 
-# Wait for everything task_run started.
+# Say what is still running and for how long.
+#
+# Without this a slow task leaves minutes of dead air, filled only by oc's
+# disk-usage checker, and the run looks hung. This is the equivalent of the
+# "[Running: ...]" column sos keeps on screen.
+# Sleeps in one-second steps rather than one long one. Killing the loop does
+# not kill a `sleep` it is blocked in, and that orphan keeps the container's
+# stdout open after collection has finished -- long enough to stall anything
+# reading the log to EOF.
+_task_heartbeat() {
+	local now running count name start waited=0
+	while [ ! -f "${TASK_STOP}" ]; do
+		sleep 1
+		waited=$((waited + 1))
+		if [ "${waited}" -lt "${TASK_HEARTBEAT}" ]; then
+			continue
+		fi
+		waited=0
+		now="$(date -u +%s)"
+		running=""
+		count=0
+		while IFS=$'\t' read -r name start; do
+			[ -n "${name}" ] || continue
+			grep -qF "${name}"$'\t' "${TASK_RESULTS}" 2>/dev/null && continue
+			running="${running}${running:+, }${name} $(_task_duration "$((now - start))")"
+			count=$((count + 1))
+		done <"${TASK_STARTED}"
+
+		[ "${count}" -gt 0 ] || continue
+		_task_say "  ... $(wc -l <"${TASK_RESULTS}" | tr -d '[:space:]')/${task_total} done; still running: ${running}"
+	done
+}
+
+_task_say() {
+	printf '%s\n' "$1"
+	printf '%s\n' "$1" >>"${TASK_PROGRESS_LOG}" 2>/dev/null || true
+}
+
+# Wait for everything task_run started, reporting progress while we do.
 task_wait() {
-	if [ "${#task_pids[@]}" -ne 0 ]; then
-		wait "${task_pids[@]}" 2>/dev/null || true
+	local heartbeat_pid=""
+
+	if [ "${#task_pids[@]}" -eq 0 ]; then
+		return 0
+	fi
+
+	if [ "${TASK_HEARTBEAT}" -gt 0 ]; then
+		_task_heartbeat &
+		heartbeat_pid=$!
+	fi
+
+	wait "${task_pids[@]}" 2>/dev/null || true
+	task_pids=()
+
+	if [ -n "${heartbeat_pid}" ]; then
+		: >"${TASK_STOP}"
+		wait "${heartbeat_pid}" 2>/dev/null || true
+		rm -f "${TASK_STOP}"
 	fi
 }
 
@@ -254,5 +327,7 @@ _task_duration() {
 if [ -n "${BASH_VERSION:-}" ]; then
 	export -f task_plan task_run task_wait task_summary
 	export -f _task_exec _task_record _task_emit _task_duration
+	export -f _task_heartbeat _task_say
 fi
 export TASK_BASE_PATH TASK_LOG_DIR TASK_RESULTS TASK_NOOP_PATTERN
+export TASK_STARTED TASK_PROGRESS_LOG TASK_HEARTBEAT TASK_STOP
