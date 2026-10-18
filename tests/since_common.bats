@@ -556,7 +556,9 @@ another plain line"
 	local missing=""
 	for f in gather_*; do
 		if grep -qE '\b(copy_pod_dir_since|pod_tar_dirs_since|filter_names_since|since_find_predicate|trim_jsonl_since|since_report)\b' "$f"; then
-			grep -q 'since_common.sh' "$f" || missing="$missing $f"
+			# directly, or through a common.sh that sources it -- the
+			# CNV fork does the latter
+			grep -qE 'since_common\.sh|common\.sh' "$f" || missing="$missing $f"
 		fi
 	done
 	[ -z "$missing" ] || {
