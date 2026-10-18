@@ -138,10 +138,32 @@ since_window_requested() {
 #
 #   find /var/log/ovnkube -type f $(since_find_predicate) -name 'libovsdb*log*'
 #
+# A plain -newermt is not enough, and getting this wrong is easy to miss.
+# mtime says when a file was last *written*, not what period it covers. A log
+# that is still the live one for a running service covers the window whether
+# or not anything happened to be written during it -- and "nothing was
+# logged" is itself worth knowing. Dropping it leaves nothing at all for that
+# service, which is the opposite of helpful.
+#
+# Seen for real: a VM whose QEMU log was last written half an hour earlier
+# was dropped entirely by --since 5m, so the collection held no QEMU log for
+# a running VM. The same thing would empty /var/log/ceph on an idle cluster.
+#
+# So a file is in scope when it was written inside the window *or* it is not
+# an archived copy. Rotated and compressed files carry a date, a .gz, or a
+# trailing .N in the name; a live log does not. This is the same rule
+# filter_names_since applies to a listing, which until now the two paths
+# disagreed about.
 since_find_predicate() {
-	if since_window_requested; then
-		echo "-newermt @${since_cutoff_epoch}"
+	if ! since_window_requested; then
+		return 0
 	fi
+
+	printf '%s' \
+		"'(' -newermt @${since_cutoff_epoch} -o '!' '(' " \
+		"-name '*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' " \
+		"-o -name '*.gz' -o -name '*.[0-9]' -o -name '*.[0-9][0-9]' " \
+		"')' ')'"
 }
 
 # Echo the epoch seconds encoded in a log file name, or nothing when the name
