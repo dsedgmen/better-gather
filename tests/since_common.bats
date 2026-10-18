@@ -180,7 +180,58 @@ load test_helper
 		since_find_predicate
 	"
 	assert_success
-	assert_output "-newermt @1792141200"
+	assert_output --partial "-newermt @1792141200"
+}
+
+@test "the window keeps a live log even when nothing was written during it" {
+	# mtime says when a file was last written, not what period it covers.
+	# A VM whose QEMU log was last written half an hour ago is still running,
+	# and dropping its only log leaves nothing at all for that VM. The same
+	# would empty /var/log/ceph on an idle cluster.
+	mkdir -p "$TEST_TMPDIR/logs"
+	touch -d '30 minutes ago' "$TEST_TMPDIR/logs/cnv-test_bg-testvm.log"
+	touch -d '30 minutes ago' "$TEST_TMPDIR/logs/ceph-osd.1.log"
+	touch -d '2 minutes ago' "$TEST_TMPDIR/logs/ceph-mon.a.log"
+
+	run bash -c "
+		export MUST_GATHER_SINCE=5m0s
+		source \"$SCRIPT_DIR/since_common.sh\"
+		get_since_cutoff
+		eval \"find '$TEST_TMPDIR/logs' -type f \$(since_find_predicate)\" | sed 's|.*/||' | sort
+	"
+	assert_success
+	assert_output "ceph-mon.a.log
+ceph-osd.1.log
+cnv-test_bg-testvm.log"
+}
+
+@test "the window still drops rotated and compressed copies" {
+	mkdir -p "$TEST_TMPDIR/rot"
+	touch -d '3 days ago' "$TEST_TMPDIR/rot/audit-2026-10-15T19-30-44.933.log"
+	touch -d '3 days ago' "$TEST_TMPDIR/rot/ceph-osd.1.log.gz"
+	touch -d '3 days ago' "$TEST_TMPDIR/rot/messages.1"
+	touch -d '3 days ago' "$TEST_TMPDIR/rot/live.log"
+
+	run bash -c "
+		export MUST_GATHER_SINCE=5m0s
+		source \"$SCRIPT_DIR/since_common.sh\"
+		get_since_cutoff
+		eval \"find '$TEST_TMPDIR/rot' -type f \$(since_find_predicate)\" | sed 's|.*/||' | sort
+	"
+	assert_success
+	# only the live one survives; the three archived copies do not
+	assert_output "live.log"
+}
+
+@test "the predicate is still empty without a window" {
+	run bash -c "
+		unset MUST_GATHER_SINCE MUST_GATHER_SINCE_TIME
+		source \"$SCRIPT_DIR/since_common.sh\"
+		get_since_cutoff
+		echo \"[\$(since_find_predicate)]\"
+	"
+	assert_success
+	assert_output "[]"
 }
 
 # =============================================================================
@@ -527,7 +578,7 @@ another plain line"
 		sh -c 'since_find_predicate'
 	"
 	assert_success
-	assert_output "-newermt @1792152000"
+	assert_output --partial "-newermt @1792152000"
 }
 
 @test "every public library function is exported" {
