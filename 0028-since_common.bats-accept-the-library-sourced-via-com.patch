@@ -1,0 +1,32 @@
+From a0af151229e6a7db022801f83ada62587e1de6f7 Mon Sep 17 00:00:00 2001
+From: David Sedgmen <dsedgmen@redhat.com>
+Date: Mon, 19 Oct 2026 06:58:14 +1000
+Subject: [PATCH 28/28] since_common.bats: accept the library sourced via
+ common.sh
+
+The CNV fork reaches it that way, so the shared test has to allow both for
+one file to be correct in all three repos.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ tests/since_common.bats | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/tests/since_common.bats b/tests/since_common.bats
+index b7ea889..23f44b0 100644
+--- a/tests/since_common.bats
++++ b/tests/since_common.bats
+@@ -556,7 +556,9 @@ another plain line"
+ 	local missing=""
+ 	for f in gather_*; do
+ 		if grep -qE '\b(copy_pod_dir_since|pod_tar_dirs_since|filter_names_since|since_find_predicate|trim_jsonl_since|since_report)\b' "$f"; then
+-			grep -q 'since_common.sh' "$f" || missing="$missing $f"
++			# directly, or through a common.sh that sources it -- the
++			# CNV fork does the latter
++			grep -qE 'since_common\.sh|common\.sh' "$f" || missing="$missing $f"
+ 		fi
+ 	done
+ 	[ -z "$missing" ] || {
+-- 
+2.56.0
+

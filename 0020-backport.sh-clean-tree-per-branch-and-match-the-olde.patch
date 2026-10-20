@@ -1,0 +1,47 @@
+From cb866032c945022c666d9d031a208a0665d178ba Mon Sep 17 00:00:00 2001
+From: David Sedgmen <dsedgmen@redhat.com>
+Date: Sat, 17 Oct 2026 13:04:14 +1000
+Subject: [PATCH 20/28] backport.sh: clean tree per branch, and match the older
+ unquoted source line
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ hack/backport.sh       | 7 +++++++
+ hack/backport_edits.py | 2 +-
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/hack/backport.sh b/hack/backport.sh
+index 6fa7017..e531cde 100755
+--- a/hack/backport.sh
++++ b/hack/backport.sh
+@@ -60,7 +60,14 @@ backport_one() {
+ 		return 1
+ 	fi
+ 
++	# Start from a genuinely clean tree. Without this the previous
++	# branch's edits survive the checkout and the next branch reports
++	# them as "already applied" while carrying another release's code.
++	git reset -q --hard
++	git clean -qfd -e tmp
+ 	git checkout -q -B "${branch}" "${upstream}"
++	git reset -q --hard "${upstream}"
++	git clean -qfd -e tmp
+ 
+ 	local f
+ 	for f in "${OURS[@]}"; do
+diff --git a/hack/backport_edits.py b/hack/backport_edits.py
+index ca96630..da0be0c 100755
+--- a/hack/backport_edits.py
++++ b/hack/backport_edits.py
+@@ -91,7 +91,7 @@ edit_re(f"{CS}/common.sh",
+ # --------------------------------------------------------------------------
+ 
+ edit_re(f"{CS}/gather_audit_logs",
+-        r'(source "\$\(dirname "\$0"\)/common\.sh"\n[ \t]*get_log_collection_args\n)',
++        r'(source "?\$\(dirname "\$0"\)/common\.sh"?\n[ \t]*get_log_collection_args\n)',
+         r'''\1
+ # oc drops --since for a --path request and the kubelet does not time-filter
+ # file serving, so the arguments threaded through below have no effect on
+-- 
+2.56.0
+

@@ -1,0 +1,728 @@
+From c2f45f86ff38be4e98c7cba2071a62d12564f5e2 Mon Sep 17 00:00:00 2001
+From: David Sedgmen <dsedgmen@redhat.com>
+Date: Sat, 17 Oct 2026 09:02:16 +1000
+Subject: [PATCH 04/28] Add since_common.sh: apply the collection window where
+ oc cannot
+
+`oc adm must-gather --since` reaches collection in only two ways: as --since
+on `oc adm inspect`, and as --since on an `oc adm node-logs` *journal* query.
+It reaches nothing else, and the scripts that collect files have had no way
+to honour it.
+
+Measured on a 4.18.54 cluster:
+
+* `oc adm node-logs --role=master --path=kube-apiserver` returns a
+  md5-identical listing with no --since, --since=-5m, --since=-30m and
+  --since='2026-10-16 06:00:00'. 41 entries, 30 rotated audit files, every
+  time.
+* A rotated audit file returns all 134269 lines in every one of those cases,
+  first event 11 hours before the cutoff.
+* Querying the kubelet directly is no better: it validates the parameter --
+  an RFC3339 'Z' value is rejected with a format error -- but does not apply
+  it to plain file serving.
+
+oc attaches the since parameter only when the path is 'journal'
+(pkg/cli/admin/node/logs.go); the flag help says "Only applies to node
+service logs". So this is not something a script can fix by passing the
+arguments more carefully. It has to do the filtering itself.
+
+Two shapes of collection need two primitives:
+
+  filter_names_since     for collection that produces a listing whose entries
+                         carry a timestamp. Entries with no recognisable
+                         timestamp always pass through, which is load-bearing:
+                         it keeps the live audit.log, termination.log, .lock
+                         and .terminating, the files most likely to hold
+                         recent events.
+
+  since_find_predicate   for collection that tars or copies a whole directory
+                         and has no notion of time at all. Expands to
+                         '-newermt @<cutoff>', or to nothing without a window,
+                         so the unbounded command is unchanged.
+                         copy_pod_dir_since builds on it to replace an
+                         `oc cp <pod>:<dir>`, which cannot express a bound,
+                         with the find|tar stream gather_network_logs already
+                         uses -- so out-of-window files never cross the wire.
+
+trim_jsonl_since makes the audit window exact rather than merely
+file-granular by trimming the file that straddles the cutoff. It is
+deliberately tolerant: a line that is not JSON is passed through verbatim,
+because /var/log/etcd is plain text, and so is a JSON object without the
+timestamp field. Only records that parse, carry the field and predate the
+cutoff are dropped, so it cannot silently empty a file it did not understand.
+
+Everything is a no-op without a window, so sourcing this cannot change a
+script's default behaviour. 30 tests.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ collection-scripts/since_common.sh | 234 ++++++++++++++++
+ tests/since_common.bats            | 415 +++++++++++++++++++++++++++++
+ 2 files changed, 649 insertions(+)
+ create mode 100644 collection-scripts/since_common.sh
+ create mode 100644 tests/since_common.bats
+
+diff --git a/collection-scripts/since_common.sh b/collection-scripts/since_common.sh
+new file mode 100644
+index 0000000..a7661c7
+--- /dev/null
++++ b/collection-scripts/since_common.sh
+@@ -0,0 +1,234 @@
++#!/bin/bash
++#
++# Applying the collection window ourselves.
++#
++# `oc adm must-gather --since` reaches collection in only two ways: as --since
++# on `oc adm inspect`, and as --since on an `oc adm node-logs` *journal* query.
++# It reaches nothing else, because oc attaches the since parameter only when
++# the node-logs path is 'journal' (openshift/oc, pkg/cli/admin/node/logs.go),
++# and the kubelet does not time-filter plain file serving even when handed the
++# parameter directly. Measured on 4.18: a rotated audit file comes back whole,
++# all 134269 lines, for --since=-5m, --since=-1h and --since='<timestamp>'.
++#
++# So the scripts that collect files have to apply the window themselves. There
++# are two shapes of that, and a helper for each:
++#
++#   name-based   the collection produces a listing whose entries carry a
++#                timestamp (audit-2026-10-16T00-15-40.612.log,
++#                insights-2026-10-16-181710.tar.gz)  ->  filter_names_since
++#
++#   mtime-based  the collection tars or copies a whole directory and has no
++#                notion of time at all  ->  since_find_predicate,
++#                copy_pod_dir_since
++#
++# Everything here is a no-op when no window was requested, so sourcing it
++# cannot change the default behaviour of a script.
++#
++# shellcheck source=collection-scripts/common.sh
++source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
++
++SINCE_REPORT_PATH="${SINCE_REPORT_PATH:-${BASE_COLLECTION_PATH:-/must-gather}/since-report.txt}"
++
++# Make sure the cutoff is available to every helper below. Scripts may also
++# call get_since_cutoff themselves; it is idempotent.
++since_cutoff_epoch="${since_cutoff_epoch:-}"
++since_cutoff_rfc3339="${since_cutoff_rfc3339:-}"
++
++# True when a collection window was requested.
++since_window_requested() {
++	[ -n "${since_cutoff_epoch:-}" ]
++}
++
++# The find(1) predicate that limits results to the window, or nothing at all.
++# Intended for unquoted expansion, exactly like log_collection_args:
++#
++#   find /var/log/ovnkube -type f $(since_find_predicate) -name 'libovsdb*log*'
++#
++since_find_predicate() {
++	if since_window_requested; then
++		echo "-newermt @${since_cutoff_epoch}"
++	fi
++}
++
++# Echo the epoch seconds encoded in a log file name, or nothing when the name
++# carries no recognisable timestamp.
++#
++# Understood, because these are what OpenShift actually produces:
++#   audit-2026-10-16T00-15-40.612.log      rotated apiserver logs
++#   insights-2026-10-16-181710.tar.gz      insights archives
++#   something-2026-10-16T00:15:40Z.log     RFC3339 in a name
++filename_timestamp_epoch() {
++	local name="$1" stamp=""
++
++	# 2026-10-16T00-15-40 (audit style: 'T' separator, '-' in the time)
++	stamp="$(echo "${name}" |
++		sed -nE 's/.*([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{2})[-:]([0-9]{2})[-:]([0-9]{2}).*/\1 \2:\3:\4/p')"
++
++	# 2026-10-16-181710 (insights style: '-' separator, no punctuation in time)
++	if [ -z "${stamp}" ]; then
++		stamp="$(echo "${name}" |
++			sed -nE 's/.*([0-9]{4}-[0-9]{2}-[0-9]{2})-([0-9]{2})([0-9]{2})([0-9]{2}).*/\1 \2:\3:\4/p')"
++	fi
++
++	if [ -z "${stamp}" ]; then
++		return 0
++	fi
++
++	date -u -d "${stamp} UTC" +%s 2>/dev/null || true
++}
++
++# Filter a listing on stdin, dropping entries whose embedded timestamp predates
++# the cutoff.
++#
++# Entries with no recognisable timestamp are always kept. That is deliberate
++# and load-bearing: it keeps the live audit.log, termination.log, .lock and
++# .terminating, which have no timestamp in the name but are exactly the files
++# most likely to contain recent events.
++#
++# A rotated file named for time T holds events up to T, so it is in scope when
++# T >= cutoff.
++#
++# Usage: ... | filter_names_since [label]
++filter_names_since() {
++	local label="${1:-collection}"
++	local line name epoch kept=0 skipped=0
++
++	if ! since_window_requested; then
++		cat
++		return 0
++	fi
++
++	while IFS= read -r line; do
++		# Listings from --role=<role> are prefixed with the node name.
++		name="${line##* }"
++		epoch="$(filename_timestamp_epoch "${name}")"
++
++		if [ -z "${epoch}" ] || [ "${epoch}" -ge "${since_cutoff_epoch}" ]; then
++			printf '%s\n' "${line}"
++			kept=$((kept + 1))
++		else
++			skipped=$((skipped + 1))
++		fi
++	done
++
++	since_report "${label}" "filename-timestamp" "${kept}" "${skipped}"
++}
++
++# Copy a directory out of a pod, limited to files modified inside the window.
++#
++# Replaces `oc cp <ns>/<pod>:<src> <dest>`, which has no way to express a time
++# bound. Streams a tarball built from a find(1) listing instead -- the same
++# idiom gather_network_logs already uses -- so that out-of-window files are
++# never transferred at all.
++#
++# `oc cp` already requires tar in the target container, so the only added
++# requirement is find. When either is missing we fall back to plain `oc cp` and
++# say so, rather than collecting nothing.
++#
++# The container is optional; pass "" to use the pod's default container.
++# Usage: copy_pod_dir_since <namespace> <pod> <container> <src-dir> <dest-dir> [label]
++copy_pod_dir_since() {
++	local ns="$1" pod="$2" container="$3" src="$4" dest="$5"
++	local label="${6:-${pod}}"
++	local predicate before after total
++	local -a c_arg=()
++
++	[ -n "${container}" ] && c_arg=(-c "${container}")
++
++	mkdir -p "${dest}"
++
++	if ! since_window_requested; then
++		oc cp -n "${ns}" "${c_arg[@]}" "${pod}:${src}" "${dest}"
++		return $?
++	fi
++
++	if ! oc exec -n "${ns}" "${pod}" "${c_arg[@]}" -- \
++		sh -c 'command -v find >/dev/null 2>&1 && command -v tar >/dev/null 2>&1' 2>/dev/null; then
++		echo "INFO: ${label}: find/tar unavailable in ${pod}; copying ${src} whole" >&2
++		oc cp -n "${ns}" "${c_arg[@]}" "${pod}:${src}" "${dest}"
++		since_report "${label}" "unfiltered-fallback" "all" "0"
++		return $?
++	fi
++
++	total="$(oc exec -n "${ns}" "${pod}" "${c_arg[@]}" -- \
++		sh -c "find '${src}' -type f 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')"
++	before="$(find "${dest}" -type f 2>/dev/null | wc -l)"
++
++	predicate="$(since_find_predicate)"
++
++	# shellcheck disable=SC2086
++	oc exec -n "${ns}" "${pod}" "${c_arg[@]}" -- \
++		sh -c "find '${src}' -type f ${predicate} -print0 2>/dev/null | tar czf - --null -T - 2>/dev/null" |
++		tar xzf - -C "${dest}" 2>/dev/null
++
++	after="$(find "${dest}" -type f 2>/dev/null | wc -l)"
++	since_report "${label}" "find-newermt" "$((after - before))" \
++		"$((${total:-0} - (after - before)))"
++}
++
++# Drop JSON-lines records older than the cutoff, by an RFC3339 field.
++#
++# Audit events carry .requestReceivedTimestamp as an RFC3339 UTC string, so a
++# plain string comparison orders them correctly. This is what makes the audit
++# window exact rather than merely file-granular: the one rotated file that
++# straddles the cutoff gets trimmed too.
++#
++# The filter is deliberately tolerant, because this runs over whatever the
++# apiserver log directories hold. A line that is not JSON -- /var/log/etcd is
++# plain text, not audit events -- is passed through verbatim, and so is a JSON
++# object that has no such field. Only records that parse *and* carry the field
++# *and* predate the cutoff are dropped, so this can never silently empty a
++# file it did not understand.
++#
++# Passes everything through untouched when no window was requested, or when jq
++# is unavailable.
++#
++# Usage: ... | trim_jsonl_since [field]
++trim_jsonl_since() {
++	local field="${1:-requestReceivedTimestamp}"
++
++	if ! since_window_requested || ! command -v jq >/dev/null 2>&1; then
++		cat
++		return 0
++	fi
++
++	jq -crR --arg cutoff "${since_cutoff_rfc3339}" --arg field "${field}" '
++		. as $line
++		| (try fromjson catch null) as $o
++		| if $o == null or ($o | type) != "object" then $line
++		  elif (($o[$field] // "") == "") then $o
++		  elif ($o[$field] >= $cutoff) then $o
++		  else empty
++		  end' 2>/dev/null
++}
++
++# Record what the window did to one piece of collection, so the result is
++# auditable rather than mysterious.
++since_report() {
++	local label="$1" mechanism="$2" kept="$3" skipped="$4"
++
++	mkdir -p "$(dirname "${SINCE_REPORT_PATH}")" 2>/dev/null || return 0
++	printf '%s\t%s\t%s\tkept=%s\tskipped=%s\n' \
++		"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${label}" "${mechanism}" "${kept}" "${skipped}" \
++		>>"${SINCE_REPORT_PATH}" 2>/dev/null || true
++}
++
++# Write the header of the report once, naming the window in force.
++since_report_header() {
++	mkdir -p "$(dirname "${SINCE_REPORT_PATH}")" 2>/dev/null || return 0
++	if [ -s "${SINCE_REPORT_PATH}" ]; then
++		return 0
++	fi
++	{
++		echo "# better-gather --since report"
++		if since_window_requested; then
++			echo "# window: everything at or after ${since_cutoff_rfc3339} (epoch ${since_cutoff_epoch})"
++			echo "# requested as: MUST_GATHER_SINCE='${MUST_GATHER_SINCE:-}' MUST_GATHER_SINCE_TIME='${MUST_GATHER_SINCE_TIME:-}'"
++		else
++			echo "# window: none requested; everything collected"
++		fi
++		printf '# %s\t%s\t%s\t%s\t%s\n' "when" "what" "mechanism" "kept" "skipped"
++	} >>"${SINCE_REPORT_PATH}" 2>/dev/null || true
++}
++
++export SINCE_REPORT_PATH
+diff --git a/tests/since_common.bats b/tests/since_common.bats
+new file mode 100644
+index 0000000..8df5070
+--- /dev/null
++++ b/tests/since_common.bats
+@@ -0,0 +1,415 @@
++#!/usr/bin/env bats
++# Tests for collection-scripts/since_common.sh and the duration helpers in
++# collection-scripts/common.sh.
++#
++# These cover the behaviour that makes --since mean something for file-based
++# collection: oc drops the since parameter for any --path request, so the
++# window has to be applied by the collection scripts themselves.
++
++load test_helper
++
++# =============================================================================
++# duration_to_seconds()
++# =============================================================================
++
++@test "duration_to_seconds sums every component of a Go duration" {
++	run bash -c "
++		source \"$SCRIPT_DIR/common.sh\"
++		duration_to_seconds '2h30m0s'
++	"
++	assert_success
++	assert_output "9000"
++}
++
++@test "duration_to_seconds handles single components" {
++	run bash -c "
++		source \"$SCRIPT_DIR/common.sh\"
++		echo \"\$(duration_to_seconds '30m0s') \$(duration_to_seconds '45s') \$(duration_to_seconds '1h0m0s') \$(duration_to_seconds '2d0h0m0s')\"
++	"
++	assert_success
++	assert_output "1800 45 3600 172800"
++}
++
++@test "duration_to_seconds does not mistake the m of ms for minutes" {
++	run bash -c "
++		source \"$SCRIPT_DIR/common.sh\"
++		duration_to_seconds '500ms'
++	"
++	assert_success
++	assert_output "0"
++}
++
++@test "duration_to_seconds truncates fractional units" {
++	run bash -c "
++		source \"$SCRIPT_DIR/common.sh\"
++		duration_to_seconds '1.5s'
++	"
++	assert_success
++	assert_output "1"
++}
++
++@test "duration_to_seconds returns 0 for junk" {
++	run bash -c "
++		source \"$SCRIPT_DIR/common.sh\"
++		echo \"[\$(duration_to_seconds 'soon')][\$(duration_to_seconds '')]\"
++	"
++	assert_success
++	assert_output "[0][0]"
++}
++
++# =============================================================================
++# duration_to_node_logs_since()
++# =============================================================================
++
++@test "duration_to_node_logs_since collapses durations without losing time" {
++	run bash -c "
++		source \"$SCRIPT_DIR/common.sh\"
++		for d in 30m0s 2h30m0s 1h0m0s 90m0s 36h0m0s 45s 168h0m0s 1h0m30s; do
++			printf '%s=%s ' \"\$d\" \"\$(duration_to_node_logs_since \"\$d\")\"
++		done
++	"
++	assert_success
++	# Every result is exactly equal to the input, never rounded either way.
++	assert_output --partial "30m0s=30m"
++	assert_output --partial "2h30m0s=150m"
++	assert_output --partial "1h0m0s=1h"
++	assert_output --partial "90m0s=90m"
++	assert_output --partial "36h0m0s=36h"
++	assert_output --partial "45s=45s"
++	assert_output --partial "168h0m0s=7d"
++	assert_output --partial "1h0m30s=3630s"
++}
++
++@test "duration_to_node_logs_since round-trips to the same number of seconds" {
++	run bash -c "
++		source \"$SCRIPT_DIR/common.sh\"
++		for d in 30m0s 2h30m0s 90m0s 36h0m0s 1h0m30s 168h0m0s; do
++			a=\$(duration_to_seconds \"\$d\")
++			b=\$(duration_to_seconds \"\$(duration_to_node_logs_since \"\$d\")\")
++			[ \"\$a\" = \"\$b\" ] || { echo \"MISMATCH \$d: \$a != \$b\"; exit 1; }
++		done
++		echo all-exact
++	"
++	assert_success
++	assert_output "all-exact"
++}
++
++@test "duration_to_node_logs_since converts a sub-second window to 1s" {
++	# node-logs has no unit finer than the second. Passing '500ms' through
++	# would be read as 500 minutes.
++	run bash -c "
++		source \"$SCRIPT_DIR/common.sh\"
++		duration_to_node_logs_since '500ms'
++	"
++	assert_success
++	assert_output "1s"
++}
++
++# =============================================================================
++# get_since_cutoff()
++# =============================================================================
++
++@test "get_since_cutoff resolves MUST_GATHER_SINCE to an absolute instant" {
++	run bash -c "
++		export MUST_GATHER_SINCE='1h0m0s'
++		source \"$SCRIPT_DIR/common.sh\"
++		get_since_cutoff
++		now=\$(date -u +%s)
++		delta=\$((now - since_cutoff_epoch))
++		# allow a couple of seconds of slack for slow machines
++		[ \"\$delta\" -ge 3598 ] && [ \"\$delta\" -le 3602 ] && echo in-range || echo \"out-of-range: \$delta\"
++	"
++	assert_success
++	assert_output "in-range"
++}
++
++@test "get_since_cutoff resolves MUST_GATHER_SINCE_TIME exactly" {
++	run bash -c "
++		export MUST_GATHER_SINCE_TIME='2026-10-16T09:00:00Z'
++		source \"$SCRIPT_DIR/common.sh\"
++		get_since_cutoff
++		echo \"\$since_cutoff_rfc3339\"
++	"
++	assert_success
++	assert_output "2026-10-16T09:00:00Z"
++}
++
++@test "get_since_cutoff prefers MUST_GATHER_SINCE_TIME over MUST_GATHER_SINCE" {
++	run bash -c "
++		export MUST_GATHER_SINCE='8h'
++		export MUST_GATHER_SINCE_TIME='2026-10-16T09:00:00Z'
++		source \"$SCRIPT_DIR/common.sh\"
++		get_since_cutoff
++		echo \"\$since_cutoff_rfc3339\"
++	"
++	assert_success
++	assert_output "2026-10-16T09:00:00Z"
++}
++
++@test "get_since_cutoff leaves the cutoff empty when no window was requested" {
++	run bash -c "
++		unset MUST_GATHER_SINCE MUST_GATHER_SINCE_TIME
++		source \"$SCRIPT_DIR/common.sh\"
++		get_since_cutoff
++		echo \"[\$since_cutoff_epoch][\$since_cutoff_rfc3339]\"
++	"
++	assert_success
++	assert_output "[][]"
++}
++
++# =============================================================================
++# since_find_predicate()
++# =============================================================================
++
++@test "since_find_predicate is empty without a window" {
++	run bash -c "
++		unset MUST_GATHER_SINCE MUST_GATHER_SINCE_TIME
++		source \"$SCRIPT_DIR/since_common.sh\"
++		get_since_cutoff
++		echo \"[\$(since_find_predicate)]\"
++	"
++	assert_success
++	assert_output "[]"
++}
++
++@test "since_find_predicate emits a newermt predicate with a window" {
++	run bash -c "
++		export MUST_GATHER_SINCE_TIME='2026-10-16T09:00:00Z'
++		source \"$SCRIPT_DIR/since_common.sh\"
++		get_since_cutoff
++		since_find_predicate
++	"
++	assert_success
++	assert_output "-newermt @1792141200"
++}
++
++# =============================================================================
++# filename_timestamp_epoch()
++# =============================================================================
++
++@test "filename_timestamp_epoch reads the audit log naming scheme" {
++	run bash -c "
++		source \"$SCRIPT_DIR/since_common.sh\"
++		filename_timestamp_epoch 'audit-2026-10-16T00-15-40.612.log'
++	"
++	assert_success
++	assert_output "1792109740"
++}
++
++@test "filename_timestamp_epoch reads the insights archive naming scheme" {
++	run bash -c "
++		source \"$SCRIPT_DIR/since_common.sh\"
++		filename_timestamp_epoch 'insights-2026-10-16-181710.tar.gz'
++	"
++	assert_success
++	assert_output "1792174630"
++}
++
++@test "filename_timestamp_epoch is silent for names without a timestamp" {
++	run bash -c "
++		source \"$SCRIPT_DIR/since_common.sh\"
++		for n in audit.log termination.log .lock .terminating startup.log; do
++			printf '[%s]' \"\$(filename_timestamp_epoch \"\$n\")\"
++		done
++	"
++	assert_success
++	assert_output "[][][][][]"
++}
++
++# =============================================================================
++# filter_names_since()
++# =============================================================================
++
++@test "filter_names_since passes everything through without a window" {
++	run bash -c "
++		unset MUST_GATHER_SINCE MUST_GATHER_SINCE_TIME
++		export SINCE_REPORT_PATH=\"$TEST_TMPDIR/report.txt\"
++		source \"$SCRIPT_DIR/since_common.sh\"
++		get_since_cutoff
++		printf '%s\n' 'audit-2020-01-01T00-00-00.000.log' 'audit.log' | filter_names_since test
++	"
++	assert_success
++	assert_output "audit-2020-01-01T00-00-00.000.log
++audit.log"
++}
++
++@test "filter_names_since drops rotated files that end before the cutoff" {
++	run bash -c "
++		export MUST_GATHER_SINCE_TIME='2026-10-16T12:00:00Z'
++		export SINCE_REPORT_PATH=\"$TEST_TMPDIR/report.txt\"
++		source \"$SCRIPT_DIR/since_common.sh\"
++		get_since_cutoff
++		printf '%s\n' \
++			'audit-2026-10-16T18-00-00.000.log' \
++			'audit-2026-10-16T06-00-00.000.log' | filter_names_since test
++	"
++	assert_success
++	assert_output "audit-2026-10-16T18-00-00.000.log"
++}
++
++@test "filter_names_since always keeps entries with no timestamp in the name" {
++	# audit.log is the live file and termination.log has no rotation stamp;
++	# these are the most likely to hold recent events, so they must survive.
++	run bash -c "
++		export MUST_GATHER_SINCE_TIME='2026-10-16T12:00:00Z'
++		export SINCE_REPORT_PATH=\"$TEST_TMPDIR/report.txt\"
++		source \"$SCRIPT_DIR/since_common.sh\"
++		get_since_cutoff
++		printf '%s\n' 'audit.log' 'termination.log' '.lock' '.terminating' \
++			'audit-2026-10-16T06-00-00.000.log' | filter_names_since test
++	"
++	assert_success
++	assert_output "audit.log
++termination.log
++.lock
++.terminating"
++}
++
++@test "filter_names_since handles listings prefixed with a node name" {
++	run bash -c "
++		export MUST_GATHER_SINCE_TIME='2026-10-16T12:00:00Z'
++		export SINCE_REPORT_PATH=\"$TEST_TMPDIR/report.txt\"
++		source \"$SCRIPT_DIR/since_common.sh\"
++		get_since_cutoff
++		printf '%s\n' \
++			'master-0 audit-2026-10-16T18-00-00.000.log' \
++			'master-1 audit-2026-10-16T06-00-00.000.log' | filter_names_since test
++	"
++	assert_success
++	assert_output "master-0 audit-2026-10-16T18-00-00.000.log"
++}
++
++@test "filter_names_since records what it kept and skipped" {
++	run bash -c "
++		export MUST_GATHER_SINCE_TIME='2026-10-16T12:00:00Z'
++		export SINCE_REPORT_PATH=\"$TEST_TMPDIR/report.txt\"
++		source \"$SCRIPT_DIR/since_common.sh\"
++		get_since_cutoff
++		printf '%s\n' 'audit.log' \
++			'audit-2026-10-16T18-00-00.000.log' \
++			'audit-2026-10-16T06-00-00.000.log' \
++			'audit-2026-10-15T06-00-00.000.log' | filter_names_since audit_logs/kube-apiserver >/dev/null
++		cat \"$TEST_TMPDIR/report.txt\"
++	"
++	assert_success
++	assert_output --partial "audit_logs/kube-apiserver"
++	assert_output --partial "kept=2"
++	assert_output --partial "skipped=2"
++}
++
++# =============================================================================
++# trim_jsonl_since()
++# =============================================================================
++
++@test "trim_jsonl_since passes everything through without a window" {
++	run bash -c "
++		unset MUST_GATHER_SINCE MUST_GATHER_SINCE_TIME
++		source \"$SCRIPT_DIR/since_common.sh\"
++		get_since_cutoff
++		printf '%s\n' '{\"requestReceivedTimestamp\":\"2020-01-01T00:00:00Z\"}' | trim_jsonl_since
++	"
++	assert_success
++	assert_output '{"requestReceivedTimestamp":"2020-01-01T00:00:00Z"}'
++}
++
++@test "trim_jsonl_since drops audit events older than the cutoff" {
++	run bash -c "
++		export MUST_GATHER_SINCE_TIME='2026-10-16T12:00:00Z'
++		source \"$SCRIPT_DIR/since_common.sh\"
++		get_since_cutoff
++		printf '%s\n' \
++			'{\"auditID\":\"new\",\"requestReceivedTimestamp\":\"2026-10-16T18:00:00.1Z\"}' \
++			'{\"auditID\":\"old\",\"requestReceivedTimestamp\":\"2026-10-16T06:00:00.1Z\"}' | trim_jsonl_since
++	"
++	assert_success
++	assert_output --partial '"auditID":"new"'
++	refute_output --partial '"auditID":"old"'
++}
++
++@test "trim_jsonl_since passes non-JSON lines through verbatim" {
++	# /var/log/etcd holds plain text, not audit events. Silently emptying it
++	# would be far worse than collecting too much.
++	run bash -c "
++		export MUST_GATHER_SINCE_TIME='2026-10-16T12:00:00Z'
++		source \"$SCRIPT_DIR/since_common.sh\"
++		get_since_cutoff
++		printf '%s\n' \
++			'2026-10-16 06:00:00 I | etcdserver: plain text line' \
++			'another plain line' | trim_jsonl_since
++	"
++	assert_success
++	assert_output "2026-10-16 06:00:00 I | etcdserver: plain text line
++another plain line"
++}
++
++@test "trim_jsonl_since keeps JSON objects that lack the timestamp field" {
++	run bash -c "
++		export MUST_GATHER_SINCE_TIME='2026-10-16T12:00:00Z'
++		source \"$SCRIPT_DIR/since_common.sh\"
++		get_since_cutoff
++		printf '%s\n' '{\"auditID\":\"nofield\"}' | trim_jsonl_since
++	"
++	assert_success
++	assert_output '{"auditID":"nofield"}'
++}
++
++# =============================================================================
++# since_report()
++# =============================================================================
++
++@test "since_report_header names the window in force" {
++	run bash -c "
++		export MUST_GATHER_SINCE_TIME='2026-10-16T09:00:00Z'
++		export SINCE_REPORT_PATH=\"$TEST_TMPDIR/report.txt\"
++		source \"$SCRIPT_DIR/since_common.sh\"
++		get_since_cutoff
++		since_report_header
++		cat \"$TEST_TMPDIR/report.txt\"
++	"
++	assert_success
++	assert_output --partial "better-gather --since report"
++	assert_output --partial "2026-10-16T09:00:00Z"
++}
++
++@test "since_report_header says so when no window was requested" {
++	run bash -c "
++		unset MUST_GATHER_SINCE MUST_GATHER_SINCE_TIME
++		export SINCE_REPORT_PATH=\"$TEST_TMPDIR/report.txt\"
++		source \"$SCRIPT_DIR/since_common.sh\"
++		get_since_cutoff
++		since_report_header
++		cat \"$TEST_TMPDIR/report.txt\"
++	"
++	assert_success
++	assert_output --partial "none requested"
++}
++
++@test "since_report_header is written only once" {
++	run bash -c "
++		export SINCE_REPORT_PATH=\"$TEST_TMPDIR/report.txt\"
++		source \"$SCRIPT_DIR/since_common.sh\"
++		get_since_cutoff
++		since_report_header
++		since_report_header
++		grep -c 'better-gather --since report' \"$TEST_TMPDIR/report.txt\"
++	"
++	assert_success
++	assert_output "1"
++}
++
++# =============================================================================
++# Sourcing is side-effect free
++# =============================================================================
++
++@test "sourcing since_common.sh changes nothing when no window is requested" {
++	run bash -c "
++		unset MUST_GATHER_SINCE MUST_GATHER_SINCE_TIME
++		source \"$SCRIPT_DIR/since_common.sh\"
++		get_since_cutoff
++		since_window_requested && echo 'window' || echo 'no-window'
++		echo \"predicate=[\$(since_find_predicate)]\"
++	"
++	assert_success
++	assert_output --partial "no-window"
++	assert_output --partial "predicate=[]"
++}
+-- 
+2.56.0
+

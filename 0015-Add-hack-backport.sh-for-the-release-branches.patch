@@ -1,0 +1,325 @@
+From af45c69f1745409b4443f0222ae7fb5dc299cd3e Mon Sep 17 00:00:00 2001
+From: David Sedgmen <dsedgmen@redhat.com>
+Date: Sat, 17 Oct 2026 13:00:48 +1000
+Subject: [PATCH 15/28] Add hack/backport.sh for the release branches
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ hack/backport.sh       | 121 ++++++++++++++++++++++++++++
+ hack/backport_edits.py | 176 +++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 297 insertions(+)
+ create mode 100755 hack/backport.sh
+ create mode 100755 hack/backport_edits.py
+
+diff --git a/hack/backport.sh b/hack/backport.sh
+new file mode 100755
+index 0000000..36643d7
+--- /dev/null
++++ b/hack/backport.sh
+@@ -0,0 +1,121 @@
++#!/usr/bin/env bash
++#
++# Create (or refresh) a release-X.Y backport branch from the matching
++# upstream branch.
++#
++# These are real backports, not cherry-picks: release-4.18 is 93 commits and
++# 41 collection scripts behind main, so replaying our commits would drag
++# unrelated upstream changes with them. Instead the branch starts from
++# upstream's own release branch and the --since work is re-applied onto it:
++#
++#   * files that are entirely ours are taken from main verbatim -- the
++#     library, the tests, the hack scripts, the Dockerfile, the workflow;
++#   * upstream's own collection scripts are edited in place, matching the
++#     text as it exists on *that* branch.
++#
++# Every edit reports whether it matched, so a branch where upstream has moved
++# the ground under us fails loudly instead of silently producing a branch
++# that looks fine and collects everything.
++#
++#   hack/backport.sh 4.18
++#   hack/backport.sh 4.18 4.19 4.20 4.21 4.22 4.23
++#
++# Verify afterwards with: make GO_REQUIRED_MIN_VERSION:= bats-check
++
++set -eu -o pipefail
++
++PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++declare -r PROJECT_ROOT
++cd "$PROJECT_ROOT"
++
++SOURCE_BRANCH="${SOURCE_BRANCH:-main}"
++
++# Files that exist only because of this fork. Safe to take wholesale: there
++# is no upstream version to conflict with.
++OURS=(
++	collection-scripts/since_common.sh
++	hack/tools-from-packages.sh
++	hack/sync-since-lib.sh
++	hack/try-on-cluster.sh
++	hack/backport.sh
++	tests/bats_assert_fallback.bash
++	tests/since_common.bats
++	tests/test_helper.bash
++	Dockerfile.overlay
++	.github/workflows/ci.yml
++)
++
++backport_one() {
++	local version="$1"
++	local branch="release-${version}"
++	local upstream="upstream/${branch}"
++
++	echo "=============================================================="
++	echo "  ${branch}"
++	echo "=============================================================="
++
++	if ! git rev-parse --verify --quiet "${upstream}" >/dev/null; then
++		echo "SKIP: ${upstream} does not exist" >&2
++		return 1
++	fi
++
++	git checkout -q -B "${branch}" "${upstream}"
++
++	local f
++	for f in "${OURS[@]}"; do
++		mkdir -p "$(dirname "$f")"
++		git checkout -q "${SOURCE_BRANCH}" -- "$f" 2>/dev/null ||
++			echo "  note: ${SOURCE_BRANCH} has no ${f}"
++	done
++
++	# Older release branches predate the bats suite entirely; they get the
++	# whole tests/ directory and the Makefile targets from us.
++	if [ ! -f tests/common.bats ]; then
++		git checkout -q "${SOURCE_BRANCH}" -- tests/ 2>/dev/null || true
++		echo "  note: branch had no tests/, took the suite from ${SOURCE_BRANCH}"
++	fi
++
++	python3 hack/backport_edits.py || return 1
++
++	git add -A
++	if git diff --cached --quiet; then
++		echo "  nothing to do"
++		return 0
++	fi
++	git commit -q -F - <<EOF
++Backport the --since work to ${version}
++
++Re-applied onto upstream/${branch} rather than cherry-picked: that branch is
++far enough behind main that replaying the commits would carry unrelated
++upstream changes with them.
++
++See the README for what this changes and why. The same bats suite runs here,
++and CI builds and publishes ghcr.io/dsedgmen/<image>:${version}.
++
++Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
++EOF
++	echo "  committed $(git rev-parse --short=8 HEAD)"
++}
++
++main() {
++	local original
++	original="$(git rev-parse --abbrev-ref HEAD)"
++	trap 'git checkout -q "${original}" 2>/dev/null || true' EXIT
++
++	if [ "$#" -eq 0 ]; then
++		echo "usage: ${BASH_SOURCE[0]##*/} <version>..." >&2
++		exit 2
++	fi
++
++	local v failed=0
++	for v in "$@"; do
++		backport_one "$v" || failed=$((failed + 1))
++	done
++
++	[ "$failed" -eq 0 ] || {
++		echo "${failed} branch(es) failed" >&2
++		exit 1
++	}
++}
++
++main "$@"
+diff --git a/hack/backport_edits.py b/hack/backport_edits.py
+new file mode 100755
+index 0000000..3ca5979
+--- /dev/null
++++ b/hack/backport_edits.py
+@@ -0,0 +1,176 @@
++#!/usr/bin/env python3
++"""Re-apply the --since edits to upstream's own collection scripts.
++
++Called by hack/backport.sh once a release branch has been checked out and the
++files that are wholly ours have been copied in. Everything here edits a file
++that upstream owns, so each edit is matched against the text as it exists on
++*that* branch and reports whether it applied.
++
++An edit that does not match is not silently skipped: scripts change between
++releases, and a backport that quietly dropped the filter would look fine and
++collect everything. Required edits that fail to match make the run fail.
++"""
++
++from __future__ import annotations
++
++import pathlib
++import re
++import sys
++
++results: list[tuple[str, str, bool]] = []
++
++
++def edit(path, old, new, *, required=True, label=None):
++    """Apply one replacement, recording whether it matched."""
++    p = pathlib.Path(path)
++    name = label or path.split("/")[-1]
++    if not p.exists():
++        results.append((name, "file absent", not required))
++        return False
++    text = p.read_text()
++    if new in text:
++        results.append((name, "already applied", True))
++        return True
++    if old not in text:
++        results.append((name, "NO MATCH", not required))
++        return False
++    p.write_text(text.replace(old, new, 1))
++    results.append((name, "applied", True))
++    return True
++
++
++def edit_re(path, pattern, repl, *, required=True, label=None, flags=0):
++    p = pathlib.Path(path)
++    name = label or path.split("/")[-1]
++    if not p.exists():
++        results.append((name, "file absent", not required))
++        return False
++    text = p.read_text()
++    new_text, n = re.subn(pattern, repl, text, count=1, flags=flags)
++    if n == 0:
++        results.append((name, "NO MATCH", not required))
++        return False
++    p.write_text(new_text)
++    results.append((name, "applied", True))
++    return True
++
++
++CS = "collection-scripts"
++
++# --------------------------------------------------------------------------
++# common.sh: source the library, and collapse durations exactly
++# --------------------------------------------------------------------------
++
++edit(f"{CS}/common.sh",
++     "#!/bin/bash\n",
++     "#!/bin/bash\n\n"
++     "# duration_to_node_logs_since and get_since_cutoff live in\n"
++     "# since_common.sh so the library is self-contained and can be vendored\n"
++     "# into the CNV and ODF forks. The dependency runs one way only.\n"
++     "# shellcheck source=collection-scripts/since_common.sh\n"
++     'source "$(dirname "${BASH_SOURCE[0]}")/since_common.sh"\n',
++     label="common.sh: source library")
++
++# Upstream writes this with varying indentation and comments across branches,
++# so match the sed itself rather than its surroundings.
++edit_re(f"{CS}/common.sh",
++        r'(?P<indent>[ \t]*)since=\$\(echo "\$\{MUST_GATHER_SINCE:-\}" \| sed [^\n]*\)\n',
++        lambda m: (
++            f"{m.group('indent')}# node-logs takes a single "
++            "'(+|-)[0-9]+(s|m|h|d)' component, so a multi-component\n"
++            f"{m.group('indent')}# duration has to be collapsed into one. Keeping only the "
++            "first\n"
++            f"{m.group('indent')}# component, as this did, silently narrows the window: 2h30m\n"
++            f"{m.group('indent')}# becomes -2h and 500ms becomes -500m, read as 500 minutes.\n"
++            f'{m.group("indent")}since=$(duration_to_node_logs_since "${{MUST_GATHER_SINCE}}")\n'
++        ),
++        label="common.sh: exact duration")
++
++# --------------------------------------------------------------------------
++# gather_audit_logs: filter the listing, trim what is downloaded
++# --------------------------------------------------------------------------
++
++edit_re(f"{CS}/gather_audit_logs",
++        r'(source "\$\(dirname "\$0"\)/common\.sh"\n[ \t]*get_log_collection_args\n)',
++        r'''\1
++# oc drops --since for a --path request and the kubelet does not time-filter
++# file serving, so the arguments threaded through below have no effect on
++# their own. Apply the window here instead.
++# shellcheck source=collection-scripts/since_common.sh
++SINCE_COMMON="$(dirname "$0")/since_common.sh"
++source "${SINCE_COMMON}"
++export SINCE_COMMON
++get_since_cutoff
++since_report_header
++''',
++        label="audit_logs: preamble")
++
++# The listing pipeline is written with a trailing pipe on main and with
++# "| \\" continuations on older branches.
++if not edit_re(f"{CS}/gather_audit_logs",
++               r'(\n[ \t]*grep -v "\.lock" \|\n)',
++               r'\1\t\tfilter_names_since "audit_logs/$path" |\n',
++               required=False, label="audit_logs: listing filter"):
++    edit_re(f"{CS}/gather_audit_logs",
++            r'(\n[ \t]*grep -v "\.lock" \| \\\n)',
++            r'\1  filter_names_since "audit_logs/$path" | \\\n',
++            label="audit_logs: listing filter (continuation style)")
++
++edit_re(f"{CS}/gather_audit_logs",
++        r'oc adm node-logs \$\{5:\+"\$5"\}([^\n]*)--path=\$1/\$4 \| gzip',
++        r'source "${SINCE_COMMON}"; oc adm node-logs ${5:+"$5"}\1--path=$1/$4 | trim_jsonl_since | gzip',
++        label="audit_logs: content trim")
++
++# --------------------------------------------------------------------------
++# gather_network_logs: bound the libovsdb tarball
++# --------------------------------------------------------------------------
++
++edit_re(f"{CS}/gather_network_logs",
++        r'(BASE_COLLECTION_PATH="must-gather"\n)',
++        r'''# shellcheck source=collection-scripts/since_common.sh
++source "$(dirname "$0")/since_common.sh"
++get_since_cutoff
++since_report_header
++
++\1''',
++        required=False, label="network_logs: preamble")
++
++edit_re(f"{CS}/gather_network_logs",
++        r"""bash -c 'find /var/log/ovnkube -type f -name "libovsdb\*log\*" \| tar czf - -T -'""",
++        r'''bash -c "find /var/log/ovnkube -type f -name 'libovsdb*log*' $(since_find_predicate) | tar czf - -T -"''',
++        required=False, label="network_logs: find predicate")
++
++# --------------------------------------------------------------------------
++# gather_insights: bound the archive copy
++# --------------------------------------------------------------------------
++
++edit_re(f"{CS}/gather_insights",
++        r'(\n)(# shellcheck disable=SC2086\n)?(oc \$COLLECTOR --namespace=openshift-insights [^\n]*\n)',
++        r'''\1# shellcheck source=collection-scripts/since_common.sh
++source "$(dirname "$0")/since_common.sh"
++get_since_cutoff
++since_report_header
++
++if since_window_requested; then
++\t# Archives are named insights-<timestamp>.tar.gz and written once, so
++\t# mtime is creation time. This is the "prune or limit" the TODO below
++\t# asks for, scoped to the window already requested.
++\techo "INFO: limiting archives to those written since ${since_cutoff_rfc3339}"
++\tcopy_pod_dir_since openshift-insights "$INSIGHTS_OPERATOR_POD" "" \\
++\t\t/var/lib/insights-operator "$INSIGHTS_DATA_PATH" insights
++else
++\t\2\3fi
++''',
++        required=False, label="insights: bounded copy")
++
++summary_failed = [r for r in results if not r[2]]
++
++width = max((len(r[0]) for r in results), default=10)
++for name, status, ok in results:
++    mark = "ok " if ok else "FAIL"
++    print(f"  [{mark}] {name:<{width}}  {status}")
++
++if summary_failed:
++    print(f"\n{len(summary_failed)} required edit(s) did not apply; "
++          "the branch would silently collect everything.", file=sys.stderr)
++    sys.exit(1)
+-- 
+2.56.0
+

@@ -1,0 +1,244 @@
+From 315d757dd855c5773a4d369648cafab162980852 Mon Sep 17 00:00:00 2001
+From: David Sedgmen <dsedgmen@redhat.com>
+Date: Sat, 17 Oct 2026 11:51:54 +1000
+Subject: [PATCH 13/28] Add CI: build the container and check the collection
+ scripts
+
+Upstream's CI (.ci-operator.yaml, OWNERS, prow) does not run for this fork,
+so nothing was checking it.
+
+Two jobs. lint-and-test runs in a Fedora container so that
+hack/tools-from-packages.sh works unchanged -- CI and a laptop then run the
+same tooling from the same source rather than two different ones. build
+produces the overlay image against a *public* base so CI needs no registry
+credentials, then runs two checks against the artefact itself: every
+collection script parses inside the image, and the --since library actually
+works there (durations collapse exactly, a window yields a find predicate,
+no window yields nothing).
+
+Nothing is published by an ordinary push or pull request. The image is
+pushed to ghcr.io only on a v* tag.
+
+Developed by simulating the job locally in a clean Fedora container, which
+caught four things a green-looking workflow would not have:
+
+* build-machinery-go checks for a Go toolchain at *parse* time, so it fires
+  for any target, including shell-only ones. GO_REQUIRED_MIN_VERSION:= is
+  its own documented override.
+* upstream's `test` target has test-unit attached to it by that include, so
+  it cannot run without Go at all. The new bats-check target does the same
+  shell work without the Go-tainted graph, and does not collide with
+  upstream's or build-machinery's names.
+* Fedora's shellcheck binary links against libnuma, and unpacking an rpm
+  does not pull its dependencies. tools-from-packages.sh now runs each tool
+  after linking it and names the missing package instead of letting it
+  surface later as a lint failure.
+* jq is needed by trim_jsonl_since; without it the tests correctly fail
+  rather than silently passing through.
+
+Verified locally: all three images build from their public bases and pass
+the smoke tests, and lint plus tests pass in a clean container with no Go
+present.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ .github/workflows/ci.yml    | 130 ++++++++++++++++++++++++++++++++++++
+ Makefile                    |  20 ++++++
+ hack/tools-from-packages.sh |  16 +++++
+ 3 files changed, 166 insertions(+)
+ create mode 100644 .github/workflows/ci.yml
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+new file mode 100644
+index 0000000..2751e17
+--- /dev/null
++++ b/.github/workflows/ci.yml
+@@ -0,0 +1,130 @@
++# Build the must-gather container and check the collection scripts.
++#
++# Upstream's CI (.ci-operator.yaml, OWNERS, prow) does not run for this fork,
++# so this is what stands in for it.
++#
++# The lint and test job runs inside a Fedora container on purpose:
++# hack/tools-from-packages.sh gets bats, shellcheck and shfmt from the
++# distribution rather than downloading release binaries from GitHub, and that
++# needs dnf. It is the same path used locally, so CI and a laptop agree.
++#
++# The image is built against a *public* base so CI needs no registry
++# credentials. For real use you want the image your cluster actually runs --
++# see Dockerfile.overlay -- but for proving the overlay builds and the
++# scripts work inside it, the public base is equivalent.
++
++name: ci
++
++on:
++  push:
++    branches: [main]
++    tags: ['v*']
++  pull_request:
++  workflow_dispatch:
++
++env:
++  PUBLIC_BASE: quay.io/openshift/origin-must-gather:latest
++  IMAGE_NAME: better-gather
++
++jobs:
++  lint-and-test:
++    runs-on: ubuntu-latest
++    container: fedora:latest
++    steps:
++      - name: Install the bits the container lacks
++        # git is needed by actions/checkout and by the test helper's
++        # `git rev-parse --show-toplevel`; rpm/cpio by tools-from-packages;
++        # numactl-libs because Fedora's shellcheck binary links against it and
++        # unpacking an rpm does not pull its dependencies; jq because
++        # trim_jsonl_since uses it and the must-gather images ship it.
++        run: dnf -y install --setopt=install_weak_deps=False
++          git make findutils tar gzip diffutils cpio rpm gawk numactl-libs jq
++
++      - uses: actions/checkout@v4
++
++      - name: Trust the workspace
++        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
++
++      - name: Bootstrap tooling from the distribution
++        run: ./hack/tools-from-packages.sh
++
++      - name: Lint and run the shell tests
++        # bats-check rather than upstream's `test`: build-machinery-go
++        # attaches test-unit to that and hard-requires a Go toolchain,
++        # which has nothing to do with checking shell scripts. The version
++        # check in the vendored golang.mk runs at parse time, so it fires for
++        # any target; GO_REQUIRED_MIN_VERSION:= is its documented override.
++        run: make GO_REQUIRED_MIN_VERSION:= bats-check
++
++  build:
++    runs-on: ubuntu-latest
++    permissions:
++      contents: read
++      packages: write
++    steps:
++      - uses: actions/checkout@v4
++
++      - name: Build the overlay image
++        run: |
++          docker build \
++            --build-arg BASE="$PUBLIC_BASE" \
++            -f Dockerfile.overlay \
++            -t "$IMAGE_NAME:ci" .
++
++      - name: The collection scripts parse inside the image
++        run: |
++          docker run --rm --entrypoint /bin/bash "$IMAGE_NAME:ci" -c '
++            set -eu
++            n=0
++            for f in /usr/bin/gather*; do
++              [ -f "$f" ] || continue
++              bash -n "$f" || { echo "FAILED to parse: $f" >&2; exit 1; }
++              n=$((n + 1))
++            done
++            echo "parsed $n collection scripts"
++            [ "$n" -gt 0 ]
++          '
++
++      - name: The --since library works inside the image
++        run: |
++          docker run --rm --entrypoint /bin/bash "$IMAGE_NAME:ci" -c '
++            set -eu
++            test -f /usr/bin/since_common.sh
++            # shellcheck source=/dev/null
++            . /usr/bin/since_common.sh
++
++            # durations collapse exactly, not by truncation
++            [ "$(duration_to_node_logs_since 2h30m0s)" = "150m" ]
++            [ "$(duration_to_node_logs_since 500ms)" = "1s" ]
++
++            # a window produces a find predicate
++            MUST_GATHER_SINCE=30m0s get_since_cutoff
++            [ -n "${since_cutoff_epoch}" ]
++            since_find_predicate | grep -q "^-newermt @"
++
++            # and no window is a no-op
++            unset MUST_GATHER_SINCE
++            get_since_cutoff
++            [ -z "$(since_find_predicate)" ]
++
++            echo "in-image --since library OK"
++          '
++
++      - name: Log in to ghcr.io
++        if: startsWith(github.ref, 'refs/tags/v')
++        uses: docker/login-action@v3
++        with:
++          registry: ghcr.io
++          username: ${{ github.actor }}
++          password: ${{ secrets.GITHUB_TOKEN }}
++
++      - name: Push
++        # Only on a tag. Nothing is published by an ordinary push or PR.
++        if: startsWith(github.ref, 'refs/tags/v')
++        run: |
++          TAG="${GITHUB_REF#refs/tags/}"
++          REPO="ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME"
++          docker tag "$IMAGE_NAME:ci" "$REPO:$TAG"
++          docker tag "$IMAGE_NAME:ci" "$REPO:latest"
++          docker push "$REPO:$TAG"
++          docker push "$REPO:latest"
+diff --git a/Makefile b/Makefile
+index f5eaaf9..fa1310f 100644
+--- a/Makefile
++++ b/Makefile
+@@ -93,3 +93,23 @@ $(TOOLS):
+ 		echo "falling back to downloading $@"; \
+ 		./hack/tools.sh $@; \
+ 	fi
++
++# Shell lint and tests without going through the build-machinery-go include.
++#
++# Upstream's `lint` and `test` targets do the same work, but the included
++# golang.mk attaches test-unit to `test` and hard-requires a Go toolchain, so
++# `make test` cannot run in an environment that only needs to check shell.
++# These names do not collide with upstream's or build-machinery's, and CI
++# uses them so that CI and a laptop run exactly the same thing.
++# depends on the bare tool names, which the $(TOOLS) rule above provides
++.PHONY: bats-lint
++bats-lint: shellcheck
++	find $(SCRIPT_DIRS) -type f -not -path '*/vendor/*' \
++		-exec grep -Eq '^#!/' {} \; -exec $(SHELLCHECK) -x {} +
++
++.PHONY: bats-test
++bats-test: bats
++	$(BATS) tests/*.bats
++
++.PHONY: bats-check
++bats-check: bats-lint bats-test
+diff --git a/hack/tools-from-packages.sh b/hack/tools-from-packages.sh
+index 659772c..5da8e38 100755
+--- a/hack/tools-from-packages.sh
++++ b/hack/tools-from-packages.sh
+@@ -102,6 +102,22 @@ link_tool() {
+ 	# Symlink rather than copy so the tool resolves its own installation
+ 	# root; bats in particular locates its libexec that way.
+ 	ln -sf "$target" "$LOCAL_BIN/$tool"
++
++	# Unpacking an rpm does not pull its dependencies, so a dynamically
++	# linked tool can land here and then fail at the point of use with a
++	# bare "cannot open shared object file". Catch that now and name the
++	# package to install, rather than letting it surface as a lint failure.
++	if ! "$LOCAL_BIN/$tool" --version >/dev/null 2>&1; then
++		local why
++		why="$("$LOCAL_BIN/$tool" --version 2>&1 | head -1)"
++		echo "ERROR: $tool was unpacked but will not run: ${why}" >&2
++		case "$why" in
++		*libnuma*) echo "       install the numactl-libs package" >&2 ;;
++		*"shared object"*) echo "       a runtime dependency of the package is missing" >&2 ;;
++		esac
++		return 1
++	fi
++
+ 	echo "OK: $tool -> $target"
+ }
+ 
+-- 
+2.56.0
+

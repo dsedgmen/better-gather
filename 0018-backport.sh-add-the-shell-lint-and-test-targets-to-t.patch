@@ -1,0 +1,77 @@
+From 337b7b739ec00eaa8288aee58583a262577fe50f Mon Sep 17 00:00:00 2001
+From: David Sedgmen <dsedgmen@redhat.com>
+Date: Sat, 17 Oct 2026 13:01:32 +1000
+Subject: [PATCH 18/28] backport.sh: add the shell lint and test targets to the
+ branch
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ hack/backport_edits.py | 52 ++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 52 insertions(+)
+
+diff --git a/hack/backport_edits.py b/hack/backport_edits.py
+index 3ca5979..4122efa 100755
+--- a/hack/backport_edits.py
++++ b/hack/backport_edits.py
+@@ -163,6 +163,58 @@ else
+ ''',
+         required=False, label="insights: bounded copy")
+ 
++# --------------------------------------------------------------------------
++# Makefile: shell lint and tests, self-contained
++# --------------------------------------------------------------------------
++#
++# Upstream's Makefile differs across release branches -- the older ones have
++# no bats wiring at all -- so append a block that defines everything it needs
++# under a BG_ prefix rather than relying on upstream's variables.
++
++MAKEFILE_BLOCK = """
++# --- better-gather: shell lint and tests -----------------------------------
++# Self-contained and BG_-prefixed so it cannot collide with upstream's
++# variables, which differ between release branches. bats-check rather than
++# `test`: on branches that vendor build-machinery-go, `test` has test-unit
++# attached to it and hard-requires a Go toolchain.
++BG_LOCALBIN ?= $(shell pwd)/tmp/bin
++BG_BATS ?= $(BG_LOCALBIN)/bats
++BG_SHELLCHECK ?= $(BG_LOCALBIN)/shellcheck
++BG_SCRIPT_DIRS := collection-scripts/ hack/ tests/
++BG_BASE ?= quay.io/openshift/origin-must-gather:latest
++BG_IMAGE ?= better-gather:latest
++
++$(BG_LOCALBIN)/%:
++\t./hack/tools-from-packages.sh $*
++
++.PHONY: bats-lint
++bats-lint: $(BG_SHELLCHECK)
++\tfind $(BG_SCRIPT_DIRS) -type f -not -path '*/vendor/*' \\
++\t\t-exec grep -Eq '^#!/' {} \\; -exec $(BG_SHELLCHECK) -x {} +
++
++.PHONY: bats-test
++bats-test: $(BG_BATS)
++\t$(BG_BATS) tests/*.bats
++
++.PHONY: bats-check
++bats-check: bats-lint bats-test
++
++.PHONY: image-overlay
++image-overlay:
++\tpodman build --build-arg BASE=$(BG_BASE) -t $(BG_IMAGE) -f Dockerfile.overlay .
++"""
++
++mk = pathlib.Path("Makefile")
++if mk.exists():
++    mk_text = mk.read_text()
++    if "bats-check" in mk_text:
++        results.append(("Makefile: bats targets", "already applied", True))
++    else:
++        mk.write_text(mk_text.rstrip("\n") + "\n" + MAKEFILE_BLOCK)
++        results.append(("Makefile: bats targets", "applied", True))
++else:
++    results.append(("Makefile: bats targets", "no Makefile", False))
++
+ summary_failed = [r for r in results if not r[2]]
+ 
+ width = max((len(r[0]) for r in results), default=10)
+-- 
+2.56.0
+

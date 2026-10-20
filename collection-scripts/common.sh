@@ -82,10 +82,12 @@ get_log_collection_args() {
 	# shellcheck disable=SC2001
 	if [ -n "${MUST_GATHER_SINCE:-}" ]; then
 		# node-logs accepts a single '(+|-)[0-9]+(s|m|h|d)' component, so a
-		# multi-component duration has to be collapsed into one. Round the
-		# whole duration *up* to its largest unit rather than truncating to
-		# the first component: truncating turns 2h30m into 2h and silently
-		# drops the oldest 30 minutes of the window the user asked for.
+		# multi-component duration has to be collapsed into one -- exactly,
+		# not by truncation. Keeping only the first component turns 2h30m
+		# into 2h and silently drops the oldest thirty minutes of the window
+		# that was asked for. duration_to_node_logs_since re-expresses the
+		# whole duration in the largest unit that divides it evenly, so
+		# 2h30m0s becomes 150m and 1h0m30s becomes 3630s.
 		since=$(duration_to_node_logs_since "${MUST_GATHER_SINCE}")
 		node_log_collection_args=--since="-${since}"
 	fi

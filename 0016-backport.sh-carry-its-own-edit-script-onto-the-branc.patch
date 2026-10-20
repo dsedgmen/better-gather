@@ -1,0 +1,25 @@
+From 0dfc780fe5210f9936e46663727eae2c6f2ab0ef Mon Sep 17 00:00:00 2001
+From: David Sedgmen <dsedgmen@redhat.com>
+Date: Sat, 17 Oct 2026 13:00:57 +1000
+Subject: [PATCH 16/28] backport.sh: carry its own edit script onto the branch
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ hack/backport.sh | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/hack/backport.sh b/hack/backport.sh
+index 36643d7..3dc26f9 100755
+--- a/hack/backport.sh
++++ b/hack/backport.sh
+@@ -38,6 +38,7 @@ OURS=(
+ 	hack/sync-since-lib.sh
+ 	hack/try-on-cluster.sh
+ 	hack/backport.sh
++	hack/backport_edits.py
+ 	tests/bats_assert_fallback.bash
+ 	tests/since_common.bats
+ 	tests/test_helper.bash
+-- 
+2.56.0
+

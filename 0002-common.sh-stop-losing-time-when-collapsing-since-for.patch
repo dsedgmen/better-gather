@@ -1,0 +1,178 @@
+From 4b1e4e7649628cd2b591bf277e31780f746cce09 Mon Sep 17 00:00:00 2001
+From: David Sedgmen <dsedgmen@redhat.com>
+Date: Sat, 17 Oct 2026 09:01:55 +1000
+Subject: [PATCH 02/28] common.sh: stop losing time when collapsing --since for
+ node-logs
+
+`oc adm node-logs --since` takes a single '(+|-)[0-9]+(s|m|h|d)' component, so
+a Go duration has to be collapsed into one. get_log_collection_args does that
+with `sed 's/\([0-9]*[dhms]\).*/\1/'`, which keeps only the first component:
+
+    2h30m0s  ->  -2h      the oldest 30 minutes of the window are dropped
+    1h0m30s  ->  -1h      the oldest 30 seconds are dropped
+    500ms    ->  -500m    read as 500 minutes, a 500x overshoot
+
+The first two silently collect less than was asked for, which is the worse
+direction to be wrong in for a support tool. tests/common.bats codified the
+2h30m case as expected behaviour, so that test is updated too.
+
+duration_to_seconds sums every component, and duration_to_node_logs_since
+re-expresses the total exactly, choosing the largest unit that divides it
+evenly and falling back to seconds, which always divides:
+
+    2h30m0s  ->  -150m
+    1h0m30s  ->  -3630s
+    168h0m0s ->  -7d
+    500ms    ->  -1s      node-logs has no finer unit than the second
+
+A test asserts every collapsed value round-trips to the same number of
+seconds, so this can never silently start rounding.
+
+Also adds get_since_cutoff, which resolves MUST_GATHER_SINCE or
+MUST_GATHER_SINCE_TIME to an absolute instant. Collection that has to apply
+the window itself needs a fixed point rather than a relative duration, since
+a long gather would otherwise drift. Used by since_common.sh.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ collection-scripts/common.sh | 100 ++++++++++++++++++++++++++++++++++-
+ tests/common.bats            |   7 ++-
+ 2 files changed, 104 insertions(+), 3 deletions(-)
+
+diff --git a/collection-scripts/common.sh b/collection-scripts/common.sh
+index b00e8f2..c93e920 100644
+--- a/collection-scripts/common.sh
++++ b/collection-scripts/common.sh
+@@ -18,6 +18,99 @@ function get_operator_ns() {
+ 	fi
+ }
+ 
++# Convert a Go duration (as oc writes MUST_GATHER_SINCE: 30m0s, 2h30m0s) into
++# total whole seconds. Sub-second components are dropped; they cannot move a
++# whole-second cutoff. Echoes 0 when nothing parses.
++duration_to_seconds() {
++	local rest="${1:-}" total=0 value unit
++
++	# Remove sub-second components first so that, for example, the 'm' of
++	# '500ms' is never mistaken for minutes.
++	rest="$(echo "${rest}" | sed -E 's/[0-9]+(\.[0-9]+)?(ns|us|µs|ms)//g')"
++	# Truncate fractions on the remaining units: 1.5s counts as 1 second.
++	rest="$(echo "${rest}" | sed -E 's/([0-9]+)\.[0-9]+/\1/g')"
++
++	while [[ "${rest}" =~ ^([0-9]+)([dhms])(.*)$ ]]; do
++		value="${BASH_REMATCH[1]}"
++		unit="${BASH_REMATCH[2]}"
++		rest="${BASH_REMATCH[3]}"
++		case "${unit}" in
++		d) total=$((total + value * 86400)) ;;
++		h) total=$((total + value * 3600)) ;;
++		m) total=$((total + value * 60)) ;;
++		s) total=$((total + value)) ;;
++		esac
++	done
++
++	echo "${total}"
++}
++
++# Collapse a Go duration into the single component that `oc adm node-logs
++# --since` accepts: '(+|-)[0-9]+(s|m|h|d)'.
++#
++# The result is always exactly equal to the input, never rounded. The unit is
++# only cosmetic -- pick the largest one that divides the total evenly, and fall
++# back to seconds, which is always exact. So 2h30m0s becomes 150m, not 2h
++# (which loses half an hour) and not 3h (which collects more than was asked
++# for).
++duration_to_node_logs_since() {
++	local seconds
++	seconds="$(duration_to_seconds "${1:-}")"
++
++	if [ "${seconds}" -le 0 ]; then
++		if [[ "${1:-}" =~ [0-9](ns|us|µs|ms) ]]; then
++			# A sub-second window. node-logs has no finer unit than the
++			# second, so ask for one. Passing the original through would
++			# hand it '500ms', which it reads as 500 *minutes*.
++			echo "1s"
++		else
++			# Nothing recognisable; pass the original through untouched so
++			# the behaviour is no worse than not having this function.
++			echo "${1:-}"
++		fi
++	elif [ "$((seconds % 86400))" -eq 0 ]; then
++		echo "$((seconds / 86400))d"
++	elif [ "$((seconds % 3600))" -eq 0 ]; then
++		echo "$((seconds / 3600))h"
++	elif [ "$((seconds % 60))" -eq 0 ]; then
++		echo "$((seconds / 60))m"
++	else
++		echo "${seconds}s"
++	fi
++}
++
++# Resolve the requested collection window to an absolute cutoff, for the
++# collection that has to apply the window itself. See since_common.sh.
++#
++# Sets:
++#   since_cutoff_epoch   - seconds since the epoch, empty when no window was
++#                          requested
++#   since_cutoff_rfc3339 - the same instant, RFC3339 UTC
++#
++# MUST_GATHER_SINCE_TIME wins over MUST_GATHER_SINCE, matching the precedence
++# get_log_collection_args already uses.
++get_since_cutoff() {
++	local seconds
++	since_cutoff_epoch=""
++	since_cutoff_rfc3339=""
++
++	if [ -n "${MUST_GATHER_SINCE_TIME:-}" ]; then
++		since_cutoff_epoch="$(date -u -d "${MUST_GATHER_SINCE_TIME}" +%s 2>/dev/null)" ||
++			since_cutoff_epoch=""
++	elif [ -n "${MUST_GATHER_SINCE:-}" ]; then
++		seconds="$(duration_to_seconds "${MUST_GATHER_SINCE}")"
++		if [ "${seconds}" -gt 0 ]; then
++			since_cutoff_epoch="$(($(date -u +%s) - seconds))"
++		fi
++	fi
++
++	if [ -n "${since_cutoff_epoch}" ]; then
++		since_cutoff_rfc3339="$(date -u -d "@${since_cutoff_epoch}" +%Y-%m-%dT%H:%M:%SZ)"
++	fi
++
++	export since_cutoff_epoch since_cutoff_rfc3339
++}
++
+ get_log_collection_args() {
+ 	# validation of MUST_GATHER_SINCE and MUST_GATHER_SINCE_TIME is done by the
+ 	# caller (oc adm must-gather) so it's safe to use the values as they are.
+@@ -74,7 +167,12 @@ get_log_collection_args() {
+ 
+ 	# shellcheck disable=SC2001
+ 	if [ -n "${MUST_GATHER_SINCE:-}" ]; then
+-		since=$(echo "${MUST_GATHER_SINCE:-}" | sed 's/\([0-9]*[dhms]\).*/\1/')
++		# node-logs accepts a single '(+|-)[0-9]+(s|m|h|d)' component, so a
++		# multi-component duration has to be collapsed into one. Round the
++		# whole duration *up* to its largest unit rather than truncating to
++		# the first component: truncating turns 2h30m into 2h and silently
++		# drops the oldest 30 minutes of the window the user asked for.
++		since=$(duration_to_node_logs_since "${MUST_GATHER_SINCE}")
+ 		node_log_collection_args=--since="-${since}"
+ 	fi
+ 	if [ -n "${MUST_GATHER_SINCE_TIME:-}" ]; then
+diff --git a/tests/common.bats b/tests/common.bats
+index b6d59bd..321d93b 100644
+--- a/tests/common.bats
++++ b/tests/common.bats
+@@ -377,6 +377,9 @@ load test_helper
+ 
+ 	assert_success
+ 	assert_output --partial "log_collection_args=--since=2h30m"
+-	# node_log_collection_args extracts only the first time unit
+-	assert_output --partial "node_log_collection_args=--since=-2h"
++	# node-logs takes a single '(+|-)[0-9]+(s|m|h|d)' component, so the
++	# duration is collapsed into one -- but exactly, not by truncation.
++	# Keeping only the first component yields -2h and silently drops the
++	# oldest 30 minutes of the window the user asked for.
++	assert_output --partial "node_log_collection_args=--since=-150m"
+ }
+-- 
+2.56.0
+

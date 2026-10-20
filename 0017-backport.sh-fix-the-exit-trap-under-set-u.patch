@@ -1,0 +1,32 @@
+From d9637d1a4a4760cba4088e4d16c6bc1ca3d132f6 Mon Sep 17 00:00:00 2001
+From: David Sedgmen <dsedgmen@redhat.com>
+Date: Sat, 17 Oct 2026 13:01:08 +1000
+Subject: [PATCH 17/28] backport.sh: fix the exit trap under set -u
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ hack/backport.sh | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/hack/backport.sh b/hack/backport.sh
+index 3dc26f9..6fa7017 100755
+--- a/hack/backport.sh
++++ b/hack/backport.sh
+@@ -98,10 +98,11 @@ EOF
+ 	echo "  committed $(git rev-parse --short=8 HEAD)"
+ }
+ 
++ORIGINAL_BRANCH=""
++
+ main() {
+-	local original
+-	original="$(git rev-parse --abbrev-ref HEAD)"
+-	trap 'git checkout -q "${original}" 2>/dev/null || true' EXIT
++	ORIGINAL_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
++	trap 'git checkout -q "${ORIGINAL_BRANCH:-main}" 2>/dev/null || true' EXIT
+ 
+ 	if [ "$#" -eq 0 ]; then
+ 		echo "usage: ${BASH_SOURCE[0]##*/} <version>..." >&2
+-- 
+2.56.0
+

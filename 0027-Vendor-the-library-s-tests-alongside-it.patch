@@ -1,0 +1,119 @@
+From a8b8da85db81f76e6ada4e83fbbe24ea5c6443b9 Mon Sep 17 00:00:00 2001
+From: David Sedgmen <dsedgmen@redhat.com>
+Date: Mon, 19 Oct 2026 06:56:46 +1000
+Subject: [PATCH 27/28] Vendor the library's tests alongside it
+
+The forks carried a stale since_common.bats, so the live-log fix synced into
+them while their tests still asserted the old predicate -- the sync script
+only ever carried the library, not the tests that cover it.
+
+The tests now source since_common.sh directly rather than reaching it
+through a common.sh, which makes one file correct in all three repos and
+lets sync-since-lib.sh carry it too.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ hack/sync-since-lib.sh | 63 ++++++++++++++++++++++++------------------
+ 1 file changed, 36 insertions(+), 27 deletions(-)
+
+diff --git a/hack/sync-since-lib.sh b/hack/sync-since-lib.sh
+index 5cab99f..f904792 100755
+--- a/hack/sync-since-lib.sh
++++ b/hack/sync-since-lib.sh
+@@ -1,6 +1,6 @@
+ #!/usr/bin/env bash
+ #
+-# Copy the canonical since_common.sh into the sibling must-gather forks.
++# Copy the canonical shared libraries into the sibling must-gather forks.
+ #
+ # The CNV and ODF must-gather images are built from their own repositories, so
+ # each needs its own copy of the library rather than a build-time dependency —
+@@ -20,8 +20,13 @@ set -eu -o pipefail
+ 
+ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ declare -r PROJECT_ROOT
+-declare -r LIB="collection-scripts/since_common.sh"
+-declare -r SOURCE="${PROJECT_ROOT}/${LIB}"
++# The tests travel with the library they cover. They source since_common.sh
++# directly rather than reaching it through a common.sh, so one file works in
++# every fork and can be compared byte for byte.
++declare -ra LIBS=(
++	collection-scripts/since_common.sh
++	tests/since_common.bats
++)
+ 
+ check_only=false
+ if [[ "${1:-}" == "--check" ]]; then
+@@ -34,41 +39,45 @@ if [[ $# -eq 0 ]]; then
+ 	exit 2
+ fi
+ 
+-if [[ ! -f "$SOURCE" ]]; then
+-	echo "ERROR: canonical library missing: $SOURCE" >&2
+-	exit 1
+-fi
+-
+ status=0
+ for fork in "$@"; do
+-	target="${fork%/}/${LIB}"
+-
+ 	if [[ ! -d "${fork%/}/collection-scripts" ]]; then
+ 		echo "ERROR: ${fork} does not look like a must-gather fork" >&2
+ 		status=1
+ 		continue
+ 	fi
+ 
+-	if [[ "$check_only" == true ]]; then
+-		if [[ ! -f "$target" ]]; then
+-			echo "MISSING  $target"
+-			status=1
+-		elif cmp -s "$SOURCE" "$target"; then
+-			echo "OK       $target"
+-		else
+-			echo "DRIFTED  $target"
+-			diff -u "$SOURCE" "$target" || true
++	for lib in "${LIBS[@]}"; do
++		source_file="${PROJECT_ROOT}/${lib}"
++		target="${fork%/}/${lib}"
++
++		if [[ ! -f "$source_file" ]]; then
++			echo "ERROR: canonical library missing: $source_file" >&2
+ 			status=1
++			continue
+ 		fi
+-		continue
+-	fi
+ 
+-	if [[ -f "$target" ]] && cmp -s "$SOURCE" "$target"; then
+-		echo "UNCHANGED $target"
+-	else
+-		cp "$SOURCE" "$target"
+-		echo "SYNCED    $target"
+-	fi
++		if [[ "$check_only" == true ]]; then
++			if [[ ! -f "$target" ]]; then
++				echo "MISSING  $target"
++				status=1
++			elif cmp -s "$source_file" "$target"; then
++				echo "OK       $target"
++			else
++				echo "DRIFTED  $target"
++				diff -u "$source_file" "$target" || true
++				status=1
++			fi
++			continue
++		fi
++
++		if [[ -f "$target" ]] && cmp -s "$source_file" "$target"; then
++			echo "UNCHANGED $target"
++		else
++			cp "$source_file" "$target"
++			echo "SYNCED    $target"
++		fi
++	done
+ done
+ 
+ exit "$status"
+-- 
+2.56.0
+

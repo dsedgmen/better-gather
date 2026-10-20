@@ -1,0 +1,392 @@
+From 4375f267ff780ee5ba52dd767a01d1d25baf650a Mon Sep 17 00:00:00 2001
+From: David Sedgmen <dsedgmen@redhat.com>
+Date: Sat, 17 Oct 2026 09:38:27 +1000
+Subject: [PATCH 08/28] Make since_common.sh self-contained so it can be
+ vendored
+
+The CNV and ODF must-gather images ship their own collection scripts and need
+the same window handling, but neither has a common.sh to source. Move
+duration_to_seconds, duration_to_node_logs_since and get_since_cutoff out of
+common.sh and into since_common.sh, and have common.sh source the library
+instead. The dependency now runs one way, and the library stands alone.
+
+Pure code movement; the 87 existing tests pass unchanged.
+
+Also adds pod_tar_dirs_since, the multi-directory sibling of
+copy_pod_dir_since, for collection that tars a fixed set of log directories
+in one shot -- CNV collects QEMU logs with
+`tar -cf - /var/log/libvirt/qemu/ /var/run/libvirt/qemu/log/ ...`, which has
+no time bound at all.
+
+hack/sync-since-lib.sh copies the canonical library into the sibling forks,
+with --check for verifying rather than writing, so each fork can fail its
+suite when its vendored copy has drifted.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ collection-scripts/common.sh       | 100 ++------------------
+ collection-scripts/since_common.sh | 142 ++++++++++++++++++++++++++++-
+ hack/sync-since-lib.sh             |  74 +++++++++++++++
+ 3 files changed, 221 insertions(+), 95 deletions(-)
+ create mode 100755 hack/sync-since-lib.sh
+
+diff --git a/collection-scripts/common.sh b/collection-scripts/common.sh
+index c93e920..b8917ff 100644
+--- a/collection-scripts/common.sh
++++ b/collection-scripts/common.sh
+@@ -1,5 +1,12 @@
+ #!/bin/bash
+ 
++# duration_to_node_logs_since and get_since_cutoff live in since_common.sh so
++# that the library is self-contained and can be vendored into the CNV and ODF
++# must-gather forks, neither of which has this file. The dependency runs one
++# way only: common.sh -> since_common.sh.
++# shellcheck source=collection-scripts/since_common.sh
++source "$(dirname "${BASH_SOURCE[0]}")/since_common.sh"
++
+ function get_operator_ns() {
+ 	# shellcheck disable=SC2155,SC2116,SC2086
+ 	local operator_name=$(echo \"$1\")
+@@ -18,99 +25,6 @@ function get_operator_ns() {
+ 	fi
+ }
+ 
+-# Convert a Go duration (as oc writes MUST_GATHER_SINCE: 30m0s, 2h30m0s) into
+-# total whole seconds. Sub-second components are dropped; they cannot move a
+-# whole-second cutoff. Echoes 0 when nothing parses.
+-duration_to_seconds() {
+-	local rest="${1:-}" total=0 value unit
+-
+-	# Remove sub-second components first so that, for example, the 'm' of
+-	# '500ms' is never mistaken for minutes.
+-	rest="$(echo "${rest}" | sed -E 's/[0-9]+(\.[0-9]+)?(ns|us|µs|ms)//g')"
+-	# Truncate fractions on the remaining units: 1.5s counts as 1 second.
+-	rest="$(echo "${rest}" | sed -E 's/([0-9]+)\.[0-9]+/\1/g')"
+-
+-	while [[ "${rest}" =~ ^([0-9]+)([dhms])(.*)$ ]]; do
+-		value="${BASH_REMATCH[1]}"
+-		unit="${BASH_REMATCH[2]}"
+-		rest="${BASH_REMATCH[3]}"
+-		case "${unit}" in
+-		d) total=$((total + value * 86400)) ;;
+-		h) total=$((total + value * 3600)) ;;
+-		m) total=$((total + value * 60)) ;;
+-		s) total=$((total + value)) ;;
+-		esac
+-	done
+-
+-	echo "${total}"
+-}
+-
+-# Collapse a Go duration into the single component that `oc adm node-logs
+-# --since` accepts: '(+|-)[0-9]+(s|m|h|d)'.
+-#
+-# The result is always exactly equal to the input, never rounded. The unit is
+-# only cosmetic -- pick the largest one that divides the total evenly, and fall
+-# back to seconds, which is always exact. So 2h30m0s becomes 150m, not 2h
+-# (which loses half an hour) and not 3h (which collects more than was asked
+-# for).
+-duration_to_node_logs_since() {
+-	local seconds
+-	seconds="$(duration_to_seconds "${1:-}")"
+-
+-	if [ "${seconds}" -le 0 ]; then
+-		if [[ "${1:-}" =~ [0-9](ns|us|µs|ms) ]]; then
+-			# A sub-second window. node-logs has no finer unit than the
+-			# second, so ask for one. Passing the original through would
+-			# hand it '500ms', which it reads as 500 *minutes*.
+-			echo "1s"
+-		else
+-			# Nothing recognisable; pass the original through untouched so
+-			# the behaviour is no worse than not having this function.
+-			echo "${1:-}"
+-		fi
+-	elif [ "$((seconds % 86400))" -eq 0 ]; then
+-		echo "$((seconds / 86400))d"
+-	elif [ "$((seconds % 3600))" -eq 0 ]; then
+-		echo "$((seconds / 3600))h"
+-	elif [ "$((seconds % 60))" -eq 0 ]; then
+-		echo "$((seconds / 60))m"
+-	else
+-		echo "${seconds}s"
+-	fi
+-}
+-
+-# Resolve the requested collection window to an absolute cutoff, for the
+-# collection that has to apply the window itself. See since_common.sh.
+-#
+-# Sets:
+-#   since_cutoff_epoch   - seconds since the epoch, empty when no window was
+-#                          requested
+-#   since_cutoff_rfc3339 - the same instant, RFC3339 UTC
+-#
+-# MUST_GATHER_SINCE_TIME wins over MUST_GATHER_SINCE, matching the precedence
+-# get_log_collection_args already uses.
+-get_since_cutoff() {
+-	local seconds
+-	since_cutoff_epoch=""
+-	since_cutoff_rfc3339=""
+-
+-	if [ -n "${MUST_GATHER_SINCE_TIME:-}" ]; then
+-		since_cutoff_epoch="$(date -u -d "${MUST_GATHER_SINCE_TIME}" +%s 2>/dev/null)" ||
+-			since_cutoff_epoch=""
+-	elif [ -n "${MUST_GATHER_SINCE:-}" ]; then
+-		seconds="$(duration_to_seconds "${MUST_GATHER_SINCE}")"
+-		if [ "${seconds}" -gt 0 ]; then
+-			since_cutoff_epoch="$(($(date -u +%s) - seconds))"
+-		fi
+-	fi
+-
+-	if [ -n "${since_cutoff_epoch}" ]; then
+-		since_cutoff_rfc3339="$(date -u -d "@${since_cutoff_epoch}" +%Y-%m-%dT%H:%M:%SZ)"
+-	fi
+-
+-	export since_cutoff_epoch since_cutoff_rfc3339
+-}
+-
+ get_log_collection_args() {
+ 	# validation of MUST_GATHER_SINCE and MUST_GATHER_SINCE_TIME is done by the
+ 	# caller (oc adm must-gather) so it's safe to use the values as they are.
+diff --git a/collection-scripts/since_common.sh b/collection-scripts/since_common.sh
+index a7661c7..26c4ead 100644
+--- a/collection-scripts/since_common.sh
++++ b/collection-scripts/since_common.sh
+@@ -24,8 +24,102 @@
+ # Everything here is a no-op when no window was requested, so sourcing it
+ # cannot change the default behaviour of a script.
+ #
+-# shellcheck source=collection-scripts/common.sh
+-source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
++# This file is deliberately self-contained: it is vendored verbatim into the
++# CNV and ODF must-gather forks, which have no common.sh. Keep it that way --
++# hack/sync-since-lib.sh copies it, and each fork tests that its copy matches.
++
++# Convert a Go duration (as oc writes MUST_GATHER_SINCE: 30m0s, 2h30m0s) into
++# total whole seconds. Sub-second components are dropped; they cannot move a
++# whole-second cutoff. Echoes 0 when nothing parses.
++duration_to_seconds() {
++	local rest="${1:-}" total=0 value unit
++
++	# Remove sub-second components first so that, for example, the 'm' of
++	# '500ms' is never mistaken for minutes.
++	rest="$(echo "${rest}" | sed -E 's/[0-9]+(\.[0-9]+)?(ns|us|µs|ms)//g')"
++	# Truncate fractions on the remaining units: 1.5s counts as 1 second.
++	rest="$(echo "${rest}" | sed -E 's/([0-9]+)\.[0-9]+/\1/g')"
++
++	while [[ "${rest}" =~ ^([0-9]+)([dhms])(.*)$ ]]; do
++		value="${BASH_REMATCH[1]}"
++		unit="${BASH_REMATCH[2]}"
++		rest="${BASH_REMATCH[3]}"
++		case "${unit}" in
++		d) total=$((total + value * 86400)) ;;
++		h) total=$((total + value * 3600)) ;;
++		m) total=$((total + value * 60)) ;;
++		s) total=$((total + value)) ;;
++		esac
++	done
++
++	echo "${total}"
++}
++
++# Collapse a Go duration into the single component that `oc adm node-logs
++# --since` accepts: '(+|-)[0-9]+(s|m|h|d)'.
++#
++# The result is always exactly equal to the input, never rounded. The unit is
++# only cosmetic -- pick the largest one that divides the total evenly, and fall
++# back to seconds, which is always exact. So 2h30m0s becomes 150m, not 2h
++# (which loses half an hour) and not 3h (which collects more than was asked
++# for).
++duration_to_node_logs_since() {
++	local seconds
++	seconds="$(duration_to_seconds "${1:-}")"
++
++	if [ "${seconds}" -le 0 ]; then
++		if [[ "${1:-}" =~ [0-9](ns|us|µs|ms) ]]; then
++			# A sub-second window. node-logs has no finer unit than the
++			# second, so ask for one. Passing the original through would
++			# hand it '500ms', which it reads as 500 *minutes*.
++			echo "1s"
++		else
++			# Nothing recognisable; pass the original through untouched so
++			# the behaviour is no worse than not having this function.
++			echo "${1:-}"
++		fi
++	elif [ "$((seconds % 86400))" -eq 0 ]; then
++		echo "$((seconds / 86400))d"
++	elif [ "$((seconds % 3600))" -eq 0 ]; then
++		echo "$((seconds / 3600))h"
++	elif [ "$((seconds % 60))" -eq 0 ]; then
++		echo "$((seconds / 60))m"
++	else
++		echo "${seconds}s"
++	fi
++}
++
++# Resolve the requested collection window to an absolute cutoff, for the
++# collection that has to apply the window itself. See since_common.sh.
++#
++# Sets:
++#   since_cutoff_epoch   - seconds since the epoch, empty when no window was
++#                          requested
++#   since_cutoff_rfc3339 - the same instant, RFC3339 UTC
++#
++# MUST_GATHER_SINCE_TIME wins over MUST_GATHER_SINCE, matching the precedence
++# get_log_collection_args already uses.
++get_since_cutoff() {
++	local seconds
++	since_cutoff_epoch=""
++	since_cutoff_rfc3339=""
++
++	if [ -n "${MUST_GATHER_SINCE_TIME:-}" ]; then
++		since_cutoff_epoch="$(date -u -d "${MUST_GATHER_SINCE_TIME}" +%s 2>/dev/null)" ||
++			since_cutoff_epoch=""
++	elif [ -n "${MUST_GATHER_SINCE:-}" ]; then
++		seconds="$(duration_to_seconds "${MUST_GATHER_SINCE}")"
++		if [ "${seconds}" -gt 0 ]; then
++			since_cutoff_epoch="$(($(date -u +%s) - seconds))"
++		fi
++	fi
++
++	if [ -n "${since_cutoff_epoch}" ]; then
++		since_cutoff_rfc3339="$(date -u -d "@${since_cutoff_epoch}" +%Y-%m-%dT%H:%M:%SZ)"
++	fi
++
++	export since_cutoff_epoch since_cutoff_rfc3339
++}
+ 
+ SINCE_REPORT_PATH="${SINCE_REPORT_PATH:-${BASE_COLLECTION_PATH:-/must-gather}/since-report.txt}"
+ 
+@@ -166,6 +260,50 @@ copy_pod_dir_since() {
+ 		"$((${total:-0} - (after - before)))"
+ }
+ 
++# Stream several directories out of a pod as one tarball, limited to files
++# modified inside the window.
++#
++# The multi-directory sibling of copy_pod_dir_since, for collection that
++# already tars a fixed set of log directories in one shot -- CNV's QEMU log
++# collection does exactly that with
++# `tar -cf - /var/log/libvirt/qemu/ /var/run/libvirt/qemu/log/ ...`.
++#
++# Missing directories are ignored, matching tar --ignore-failed-read, so this
++# is safe to point at paths that only exist on some pods.
++#
++# Usage: pod_tar_dirs_since <namespace> <pod> <container> <dest-dir> <label> <src-dir>...
++pod_tar_dirs_since() {
++	local ns="$1" pod="$2" container="$3" dest="$4" label="$5"
++	shift 5
++	local predicate quoted=""
++	local -a c_arg=()
++
++	[ -n "${container}" ] && c_arg=(-c "${container}")
++	mkdir -p "${dest}"
++
++	local dir
++	for dir in "$@"; do
++		quoted+=" '${dir}'"
++	done
++
++	predicate="$(since_find_predicate)"
++
++	# -prune-less: just let find skip what does not exist, as tar
++	# --ignore-failed-read would.
++	# shellcheck disable=SC2086
++	oc exec -n "${ns}" "${pod}" "${c_arg[@]}" -- \
++		sh -c "find ${quoted} -type f ${predicate} -print0 2>/dev/null | tar czf - --null -T - 2>/dev/null" |
++		tar xzf - -C "${dest}" 2>/dev/null
++
++	if since_window_requested; then
++		since_report "${label}" "find-newermt" \
++			"$(find "${dest}" -type f 2>/dev/null | wc -l)" "pre-cutoff"
++	else
++		since_report "${label}" "no-window" \
++			"$(find "${dest}" -type f 2>/dev/null | wc -l)" "0"
++	fi
++}
++
+ # Drop JSON-lines records older than the cutoff, by an RFC3339 field.
+ #
+ # Audit events carry .requestReceivedTimestamp as an RFC3339 UTC string, so a
+diff --git a/hack/sync-since-lib.sh b/hack/sync-since-lib.sh
+new file mode 100755
+index 0000000..5cab99f
+--- /dev/null
++++ b/hack/sync-since-lib.sh
+@@ -0,0 +1,74 @@
++#!/usr/bin/env bash
++#
++# Copy the canonical since_common.sh into the sibling must-gather forks.
++#
++# The CNV and ODF must-gather images are built from their own repositories, so
++# each needs its own copy of the library rather than a build-time dependency —
++# that is simply how must-gather images ship, with collection-scripts/ copied
++# straight into /usr/bin.
++#
++# This repo holds the canonical copy. Each fork carries a test asserting its
++# vendored copy is byte-identical, so drift fails the suite instead of rotting
++# quietly.
++#
++#   hack/sync-since-lib.sh ../better-gather-cnv ../better-gather-odf
++#   hack/sync-since-lib.sh --check ../better-gather-cnv      # verify only
++#
++# Exits non-zero under --check if any copy differs, so CI can use it.
++
++set -eu -o pipefail
++
++PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++declare -r PROJECT_ROOT
++declare -r LIB="collection-scripts/since_common.sh"
++declare -r SOURCE="${PROJECT_ROOT}/${LIB}"
++
++check_only=false
++if [[ "${1:-}" == "--check" ]]; then
++	check_only=true
++	shift
++fi
++
++if [[ $# -eq 0 ]]; then
++	echo "usage: ${BASH_SOURCE[0]##*/} [--check] <fork-dir>..." >&2
++	exit 2
++fi
++
++if [[ ! -f "$SOURCE" ]]; then
++	echo "ERROR: canonical library missing: $SOURCE" >&2
++	exit 1
++fi
++
++status=0
++for fork in "$@"; do
++	target="${fork%/}/${LIB}"
++
++	if [[ ! -d "${fork%/}/collection-scripts" ]]; then
++		echo "ERROR: ${fork} does not look like a must-gather fork" >&2
++		status=1
++		continue
++	fi
++
++	if [[ "$check_only" == true ]]; then
++		if [[ ! -f "$target" ]]; then
++			echo "MISSING  $target"
++			status=1
++		elif cmp -s "$SOURCE" "$target"; then
++			echo "OK       $target"
++		else
++			echo "DRIFTED  $target"
++			diff -u "$SOURCE" "$target" || true
++			status=1
++		fi
++		continue
++	fi
++
++	if [[ -f "$target" ]] && cmp -s "$SOURCE" "$target"; then
++		echo "UNCHANGED $target"
++	else
++		cp "$SOURCE" "$target"
++		echo "SYNCED    $target"
++	fi
++done
++
++exit "$status"
+-- 
+2.56.0
+
