@@ -21,3 +21,7 @@
 *.out
 
 /tmp
+
+# git format-patch output, which must never be committed
+/0[0-9][0-9][0-9]-*.patch
+*.mbox
