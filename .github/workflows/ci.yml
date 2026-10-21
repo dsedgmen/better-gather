@@ -86,8 +86,9 @@ jobs:
             --load .
 
       - name: Refuse to ship on a stale base
-        run: ./hack/check-base.sh --max-age "$MAX_BASE_AGE_DAYS" \
-               registry.access.redhat.com/ubi9/ubi-minimal:latest
+        run: |
+          ./hack/check-base.sh --max-age "$MAX_BASE_AGE_DAYS" \
+            registry.access.redhat.com/ubi9/ubi-minimal:latest
 
       - name: Build for this runner and load it, so it can be tested
         # Multi-platform builds cannot be --load'ed into the local docker, so

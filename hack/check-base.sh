@@ -43,13 +43,17 @@ if [[ -z "$image" ]]; then
 	exit 2
 fi
 
+# Both of these are allowed to fail -- an unreachable registry is reported
+# below, not an error here. The trailing `|| true` is load-bearing: without it
+# `set -e` aborts on the failing assignment and the message never prints.
 created=""
 if command -v skopeo >/dev/null 2>&1; then
 	created="$(skopeo inspect "docker://${image}" 2>/dev/null |
-		sed -n 's/.*"Created": *"\([0-9-]\{10\}\).*/\1/p' | head -1)"
+		sed -n 's/.*"Created": *"\([0-9-]\{10\}\).*/\1/p' | head -1 || true)"
 elif command -v podman >/dev/null 2>&1; then
 	podman pull -q "${image}" >/dev/null 2>&1 || true
-	created="$(podman image inspect "${image}" --format '{{.Created}}' 2>/dev/null | cut -c1-10)"
+	created="$(podman image inspect "${image}" --format '{{.Created}}' 2>/dev/null |
+		cut -c1-10 || true)"
 fi
 
 if [[ -z "$created" ]]; then
@@ -58,7 +62,11 @@ if [[ -z "$created" ]]; then
 	exit 0
 fi
 
-age=$((($(date +%s) - $(date -d "${created}" +%s)) / 86400))
+if ! built_epoch="$(date -d "${created}" +%s 2>/dev/null)"; then
+	echo "WARNING: ${image} reports an unparseable build date: ${created}" >&2
+	exit 0
+fi
+age=$((($(date +%s) - built_epoch) / 86400))
 
 printf '%s\n' "base:  ${image}"
 printf '%s\n' "built: ${created} (${age} days ago)"
