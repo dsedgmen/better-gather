@@ -38,6 +38,7 @@ package_for() {
 	bats) echo "bats" ;;
 	shellcheck) echo "ShellCheck" ;;
 	shfmt) echo "shfmt" ;;
+	trivy) echo "trivy" ;;
 	*) return 1 ;;
 	esac
 }
@@ -144,6 +145,9 @@ main() {
 	require rpm2cpio
 	require cpio
 
+	# trivy is deliberately not in the default set: it is a ~78 MB download
+	# that only `make scan-*` needs, and nothing in lint or test uses it.
+	#   hack/tools-from-packages.sh trivy
 	local tools=("$@")
 	if [[ ${#tools[@]} -eq 0 ]]; then
 		tools=(bats shellcheck shfmt)
