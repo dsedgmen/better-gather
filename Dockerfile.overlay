@@ -32,9 +32,19 @@ FROM ${BASE}
 
 COPY collection-scripts/ /usr/bin/
 
+# In the overlay rather than the base, so it travels onto whatever image you
+# layer onto. gather prints it and copies it into every collection.
+COPY DISCLAIMER /usr/share/better-gather/DISCLAIMER
+
 ARG BASE
 ARG BASE_BUILT="unknown"
 LABEL io.k8s.display-name="better-gather" \
-      io.k8s.description="must-gather collection scripts that honour --since" \
+      io.k8s.description="Unofficial must-gather collection scripts that honour --since. Not a Red Hat product." \
       better-gather.base="${BASE}" \
-      better-gather.base-built="${BASE_BUILT}"
+      better-gather.base-built="${BASE_BUILT}" \
+      better-gather.disclaimer="Not a Red Hat product: unofficial fork of openshift/must-gather, unsupported, no warranty. See /usr/share/better-gather/DISCLAIMER" \
+      org.opencontainers.image.title="better-gather" \
+      org.opencontainers.image.description="Unofficial fork of openshift/must-gather in which --since bounds what is collected. Not a Red Hat product." \
+      org.opencontainers.image.vendor="dsedgmen (unofficial -- not Red Hat)" \
+      org.opencontainers.image.source="https://github.com/dsedgmen/better-gather" \
+      org.opencontainers.image.licenses="Apache-2.0"

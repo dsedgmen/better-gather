@@ -65,6 +65,45 @@ jobs:
         # any target; GO_REQUIRED_MIN_VERSION:= is its documented override.
         run: make GO_REQUIRED_MIN_VERSION:= bats-check
 
+  scan-code:
+    # Vulnerable dependencies, committed secrets and Dockerfile
+    # misconfiguration. Reporting only: this job never fails the build.
+    # Accepted findings live in .trivyignore, each with a reason.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan the tree
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          skip-dirs: '**/vendor'
+          severity: HIGH,CRITICAL
+          format: table
+          exit-code: 0
+
+      - name: Keep the code scan as an artifact
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          skip-dirs: '**/vendor'
+          format: json
+          output: trivy-code.json
+          exit-code: 0
+
+      - name: Upload the code scan
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-code-${{ github.sha }}
+          path: trivy-code.json
+          if-no-files-found: warn
+
   build:
     runs-on: ubuntu-latest
     permissions:
@@ -156,6 +195,37 @@ jobs:
 
             echo "in-image --since library OK"
           '
+
+      - name: Scan the image for vulnerabilities
+        # Reporting only: `exit-code: 0`. This image adds no packages of its
+        # own, so an unfixed CVE in the base is not something it can action,
+        # and a gate nobody can satisfy only teaches people to ignore it. The
+        # staleness gate above is the one that does fail.
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:ci
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          format: table
+          exit-code: 0
+
+      - name: Keep the image scan as an artifact
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:ci
+          scanners: vuln
+          format: json
+          output: trivy-image.json
+          exit-code: 0
+
+      - name: Upload the image scan
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-${{ github.sha }}
+          path: trivy-image.json
+          if-no-files-found: warn
 
       - name: Work out the tags
         # main           -> :latest and :main-<sha>
