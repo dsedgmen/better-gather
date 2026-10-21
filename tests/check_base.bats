@@ -27,9 +27,12 @@ stub_skopeo() {
 		echo '{"Created": "${created}T00:00:00Z"}'
 	EOF
 	chmod +x "${STUB_DIR}/skopeo"
-	# So the podman branch is never reached in these tests.
-	printf '#!/bin/bash\nexit 1\n' >"${STUB_DIR}/podman"
-	chmod +x "${STUB_DIR}/podman"
+	# So the local-image-store fallbacks never answer in these tests, on a
+	# machine that has them or one that does not.
+	for stub in podman docker; do
+		printf '#!/bin/bash\nexit 1\n' >"${STUB_DIR}/${stub}"
+		chmod +x "${STUB_DIR}/${stub}"
+	done
 }
 
 @test "check-base: a fresh base passes" {

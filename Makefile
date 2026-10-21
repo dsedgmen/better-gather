@@ -59,7 +59,7 @@ check-base:
 image-overlay:
 	@test -n "$(BASE)" || { echo "set BASE, e.g. BASE=\$$(oc adm release info --image-for=must-gather)"; exit 2; }
 	podman build --build-arg BASE=$(BASE) \
-		--build-arg BASE_BUILT="$$(./hack/check-base.sh --warn-only $(BASE) 2>/dev/null | sed -n 's/^built: \([0-9-]*\).*/\1/p')" \
+		--build-arg BASE_BUILT="$$(./hack/check-base.sh --warn-only $(BASE) 2>/dev/null | sed -n 's/^built: \([0-9-]*\).*/\1/p' | grep . || echo unknown)" \
 		-t $(OVERLAY_IMAGE) -f Dockerfile.overlay .
 
 # Directories containing shell scripts to lint and format

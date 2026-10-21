@@ -22,9 +22,10 @@
 #
 #   oc get csv -n openshift-cnv -o json | jq -r '..|.["operators.openshift.io/must-gather-image"]? // empty'
 #
-# CI passes a public base because it has no pull credentials; those builds
-# are for checking the scripts work in an image, and are labelled with the
-# base they used so it is never a mystery.
+# CI has no pull credentials for any cluster's image, so it builds its own
+# base from UBI9 -- see Dockerfile.base. Either way the result is labelled
+# with the base it used and when that base was built, so it is never a
+# mystery what a scan is actually reporting on.
 
 ARG BASE
 FROM ${BASE}

@@ -43,16 +43,25 @@ if [[ -z "$image" ]]; then
 	exit 2
 fi
 
-# Both of these are allowed to fail -- an unreachable registry is reported
+# Every lookup here is allowed to fail -- an unreachable registry is reported
 # below, not an error here. The trailing `|| true` is load-bearing: without it
 # `set -e` aborts on the failing assignment and the message never prints.
 created=""
+
+# The registry, which is what matters for a base someone else publishes.
 if command -v skopeo >/dev/null 2>&1; then
 	created="$(skopeo inspect "docker://${image}" 2>/dev/null |
 		sed -n 's/.*"Created": *"\([0-9-]\{10\}\).*/\1/p' | head -1 || true)"
-elif command -v podman >/dev/null 2>&1; then
-	podman pull -q "${image}" >/dev/null 2>&1 || true
+fi
+
+# Then the local image store, which is where a base built by `make image-base`
+# lives and where it will never be found by a registry lookup.
+if [[ -z "$created" ]] && command -v podman >/dev/null 2>&1; then
 	created="$(podman image inspect "${image}" --format '{{.Created}}' 2>/dev/null |
+		cut -c1-10 || true)"
+fi
+if [[ -z "$created" ]] && command -v docker >/dev/null 2>&1; then
+	created="$(docker image inspect "${image}" --format '{{.Created}}' 2>/dev/null |
 		cut -c1-10 || true)"
 fi
 
