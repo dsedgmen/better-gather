@@ -25,8 +25,11 @@ FROM ${UBI}
 
 # stable tracks the current oc release; pin to e.g. 4.18.21 to match a cluster.
 ARG OC_VERSION=stable
-# Set by buildx for each platform; defaulted so a plain `podman build` works.
-ARG TARGETARCH=amd64
+# Set automatically per platform by buildx and by podman. Deliberately
+# undefaulted: a default wins over the value the builder supplies, which
+# silently unpacks an x86_64 oc into an arm64 image. uname -m is the fallback
+# for a builder that sets neither.
+ARG TARGETARCH
 
 # What the collection scripts need, and nothing else:
 #   tar gzip        archive handling, and oc cp/rsync require tar in the image
@@ -44,12 +47,13 @@ RUN microdnf install -y --nodocs --setopt=install_weak_deps=0 \
     && rm -rf /var/cache/yum
 
 RUN set -eux; \
-    case "${TARGETARCH}" in \
-        amd64)   arch=x86_64  ;; \
-        arm64)   arch=arm64   ;; \
-        s390x)   arch=s390x   ;; \
-        ppc64le) arch=ppc64le ;; \
-        *) echo "unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    want="${TARGETARCH:-$(uname -m)}"; \
+    case "${want}" in \
+        amd64 | x86_64)  arch=x86_64  ;; \
+        arm64 | aarch64) arch=arm64   ;; \
+        s390x)           arch=s390x   ;; \
+        ppc64le)         arch=ppc64le ;; \
+        *) echo "unsupported architecture: ${want}" >&2; exit 1 ;; \
     esac; \
     curl -sSLf --retry 3 \
         "https://mirror.openshift.com/pub/openshift-v4/${arch}/clients/ocp/${OC_VERSION}/openshift-client-linux.tar.gz" \
