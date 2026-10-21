@@ -152,15 +152,27 @@ jobs:
             [ "$(duration_to_node_logs_since 2h30m0s)" = "150m" ]
             [ "$(duration_to_node_logs_since 500ms)" = "1s" ]
 
-            # a window produces a find predicate
+            # The find predicate is checked by what it selects rather than by
+            # how it is spelled, so that rewording it does not fail the build
+            # and changing its behaviour does.
+            cd "$(mktemp -d)"
+            touch -d "2 hours ago" live.log rotated-2024-01-01.log rotated.log.gz
+            touch recent.log
+
             MUST_GATHER_SINCE=30m0s get_since_cutoff
             [ -n "${since_cutoff_epoch}" ]
-            since_find_predicate | grep -q "^-newermt @"
+            got="$(eval "find . -type f $(since_find_predicate) -print" | sort | tr "\n" " ")"
+            # live.log predates the cutoff but is the file still being written
+            # to, so it holds the records covering the window. The rotated and
+            # compressed ones are genuinely out of it.
+            [ "$got" = "./live.log ./recent.log " ] || {
+              echo "unexpected selection: [$got]" >&2; exit 1; }
 
-            # and no window is a no-op
+            # and no window selects everything
             unset MUST_GATHER_SINCE
             get_since_cutoff
             [ -z "$(since_find_predicate)" ]
+            [ "$(eval "find . -type f $(since_find_predicate) -print" | wc -l)" -eq 4 ]
 
             echo "in-image --since library OK"
           '
