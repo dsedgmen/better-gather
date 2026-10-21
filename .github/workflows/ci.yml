@@ -8,10 +8,15 @@
 # distribution rather than downloading release binaries from GitHub, and that
 # needs dnf. It is the same path used locally, so CI and a laptop agree.
 #
-# The image is built against a *public* base so CI needs no registry
-# credentials. For real use you want the image your cluster actually runs --
-# see Dockerfile.overlay -- but for proving the overlay builds and the
-# scripts work inside it, the public base is equivalent.
+# The image is built on a base this repo produces from UBI9 minimal, which
+# Red Hat rebuilds continuously and which needs no pull credentials. It used
+# to layer onto quay.io/openshift/origin-must-gather:latest, last rebuilt in
+# February; since this image adds nothing but shell scripts, all of that
+# staleness showed up in a scan as though it were ours.
+#
+# For collecting from a cluster you have access to, prefer layering onto that
+# cluster's own must-gather image instead -- see Dockerfile.overlay. It
+# carries exactly the CVEs you have already accepted.
 
 name: ci
 
@@ -23,7 +28,6 @@ on:
   workflow_dispatch:
 
 env:
-  PUBLIC_BASE: quay.io/openshift/origin-must-gather:latest
   PLATFORMS: linux/amd64
   IMAGE_NAME: better-gather
 
@@ -67,6 +71,20 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      - name: Build a current base from UBI9
+        # No credentials needed, and rebuilt continuously upstream, unlike
+        # every public must-gather image.
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            -f Dockerfile.base \
+            -t "$BASE_IMAGE" \
+            --load .
+
+      - name: Refuse to ship on a stale base
+        run: ./hack/check-base.sh --max-age "$MAX_BASE_AGE_DAYS" \
+               registry.access.redhat.com/ubi9/ubi-minimal:latest
+
       - name: Build for this runner and load it, so it can be tested
         # Multi-platform builds cannot be --load'ed into the local docker, so
         # the image that gets smoke-tested is the native one. The Dockerfile
@@ -75,7 +93,8 @@ jobs:
         run: |
           docker buildx build \
             --platform linux/amd64 \
-            --build-arg BASE="$PUBLIC_BASE" \
+            --build-arg BASE="$BASE_IMAGE" \
+            --build-arg BASE_BUILT="$(date -u +%Y-%m-%d)" \
             -f Dockerfile.overlay \
             -t "$IMAGE_NAME:ci" \
             --load .
@@ -160,7 +179,8 @@ jobs:
         run: |
           docker buildx build \
             --platform "$PLATFORMS" \
-            --build-arg BASE="$PUBLIC_BASE" \
+            --build-arg BASE="$BASE_IMAGE" \
+            --build-arg BASE_BUILT="$(date -u +%Y-%m-%d)" \
             -f Dockerfile.overlay \
             $(echo "${{ steps.tags.outputs.tags }}" | tr "," "\n" | sed "s/^/--tag /" | tr "\n" " ") \
             --push .

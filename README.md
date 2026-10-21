@@ -157,108 +157,77 @@ libraries are still used when present.
 
 ## Images
 
-CI builds the overlay image and pushes it to ghcr.io on `main`, on every
-`release-*` branch, and on a `v*` tag. Pull requests build and smoke-test but
-publish nothing.
+This image adds **only shell scripts** -- no packages, no binaries -- so
+every vulnerability it reports comes from whatever it is layered on. That
+makes the choice of base the whole of its security posture, and
+`Dockerfile.overlay` deliberately has no default: a build without `BASE`
+fails rather than silently picking something stale.
 
-| ref | tags |
-| --- | --- |
-| `main` | `:latest`, `:main-<sha>` |
-| `release-4.18` | `:4.18`, `:release-4.18` |
-| `v1.2.3` | `:v1.2.3`, `:latest` |
+### The best base is the one your cluster already runs
 
-A release branch deliberately does not move `:latest`, so `--image …:4.18`
-keeps getting the 4.18 collection scripts whatever happens on main.
-
-**The packages are private**, inheriting the repository's visibility, so a
-cluster needs a pull secret — or one of the two ways round it below.
-
-### With a pull secret
-
-`--run-namespace` needs an **already privileged** namespace — the flag's own
-help says so, and it matters more than it sounds. When `oc` creates its own
-temporary namespace it also creates a ClusterRoleBinding granting
-`cluster-admin` to that namespace's `default` ServiceAccount, and labels the
-namespace for privileged pod security. With `--run-namespace` it does
-neither: it only looks the namespace up
-([`mustgather.go`](https://github.com/openshift/oc/blob/master/pkg/cli/admin/mustgather/mustgather.go),
-`getNamespace`). A plain `oc create namespace` therefore fails partway
-through collection with:
-
-```
-Error from server (Forbidden): csistoragecapacities.storage.k8s.io is forbidden:
-User "system:serviceaccount:must-gather-run:default" cannot list resource ...
-```
-
-Create it with the same labels and binding `oc` would have made:
+It carries exactly the CVEs you have already accepted, and its tooling
+matches your release:
 
 ```console
-$ cat <<'EOF' | oc apply -f -
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: must-gather-run
-  labels:
-    openshift.io/run-level: "0"
-    pod-security.kubernetes.io/enforce: privileged
-    pod-security.kubernetes.io/audit: privileged
-    pod-security.kubernetes.io/warn: privileged
-    security.openshift.io/scc.podSecurityLabelSync: "false"
-  annotations:
-    openshift.io/node-selector: ""
-EOF
-
-$ oc adm policy add-cluster-role-to-user cluster-admin -z default -n must-gather-run
+$ make image-overlay BASE=$(oc adm release info --image-for=must-gather)
 ```
 
-The token for the pull secret must be a **classic** personal access token.
-GitHub's own documentation is explicit: *"GitHub Packages only supports
-authentication using a personal access token (classic)."* Fine-grained
-tokens are not accepted by ghcr.io at all, and have no `read:packages` scope
-to select — if you are looking at a scope list without it, you are on the
-fine-grained page.
-
-Settings → Developer settings → Personal access tokens → **Tokens (classic)**
-→ Generate new token (classic) → tick **`read:packages`**.
-
-```console
-$ oc create secret docker-registry ghcr \
-    --docker-server=ghcr.io \
-    --docker-username=dsedgmen \
-    --docker-password=<classic PAT with read:packages> \
-    -n must-gather-run
-$ oc secrets link default ghcr --for=pull -n must-gather-run
-
-$ oc adm must-gather \
-    --run-namespace must-gather-run \
-    --image=ghcr.io/dsedgmen/better-gather:4.18 \
-    --since 30m
-```
-
-Verified on a 4.18 cluster: with the namespace made this way a run completes
-with no Forbidden errors; with a bare `oc create namespace` it does not.
-
-### Without a token at all
-
-**Make the package public** — repository → Packages → the package → Package
-settings → Change visibility. Any cluster can then pull it with no setup.
-The repository stays private; only the image becomes readable, which does
-publish the collection scripts, since they are in the image layers.
-
-**Or build straight into the cluster's own registry**, which needs no GitHub
-credentials and no external pull at all:
+Or build it inside the cluster, which needs no registry credentials at all:
 
 ```console
 $ oc new-project better-gather-build
 $ oc new-build --name mg --binary --strategy=docker
 $ oc start-build mg --from-dir=. --follow
-$ oc adm must-gather \
-    --run-namespace better-gather-build \
-    --image=image-registry.openshift-image-registry.svc:5000/better-gather-build/mg:latest
 ```
 
-This is how the changes here were tested; see also `hack/try-on-cluster.sh`,
-which needs neither a build nor a registry.
+A scan of that image is identical to a scan of the must-gather you are
+already running. No prebuilt image can do better.
+
+### The published images
+
+For when you do not have the cluster to hand, CI publishes images built on a
+base this repo produces from `registry.access.redhat.com/ubi9/ubi-minimal`,
+which Red Hat rebuilds continuously and which needs no pull credentials:
+
+```console
+$ make image-base                                  # the UBI9 base
+$ make image-overlay BASE=better-gather-base:latest
+```
+
+These used to be layered onto `quay.io/openshift/origin-must-gather:latest`.
+There is no fresh public must-gather image to use -- `latest` is the newest
+tag any of them publishes, and at the time of writing:
+
+| base | last rebuilt |
+| ---- | ------------ |
+| `quay.io/openshift/origin-must-gather:latest` | 2026-02-13 |
+| `quay.io/kubevirt/must-gather:latest` | 2026-07-06 |
+| `quay.io/ocs-dev/ocs-must-gather:latest` | 2025-07-02 |
+| `registry.access.redhat.com/ubi9/ubi-minimal:latest` | rebuilt continuously |
+
+`hack/check-base.sh` reports how old a base is and fails past 60 days, and
+CI runs it before publishing, so this cannot quietly rot again. Every image
+carries `better-gather.base` and `better-gather.base-built` labels recording
+what it was built on.
+
+The UBI9 base is smaller too -- 296 MB against 495 MB -- because it carries
+only what the collection scripts use: `oc`, `jq`, `rsync`, `tar`, `gzip`,
+`findutils`, `util-linux`, `procps-ng` and the usual text tools.
+
+### Tags
+
+| ref | tags |
+| --- | --- |
+| `main` | `:latest`, `:main-<sha>` |
+| `release-4.18` | `:4.18`, `:release-4.18` |
+| any other branch | `:branch-<name>` |
+| `v1.2.3` | `:v1.2.3`, `:latest` |
+
+A release branch deliberately does not move `:latest`.
+
+**The packages are private**, inheriting the repository's visibility, so a
+cluster needs a pull secret -- or use the in-cluster build above, which
+avoids the question entirely.
 
 ## Release branches
 

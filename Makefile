@@ -37,12 +37,30 @@ $(call verify-golang-versions,Dockerfile.ocp)
 # Overlay build: layer the collection scripts onto an existing must-gather
 # image, so the base is version-matched to the cluster under test and needs no
 # CI credentials. See Dockerfile.overlay.
-BASE ?= quay.io/openshift/origin-must-gather:latest
+# BASE has no default on purpose. This image adds only shell scripts, so all
+# of its CVE exposure comes from whatever it is layered on, and the public
+# community must-gather images have not been rebuilt in months. Pass the
+# image your cluster runs, or build a current one with image-base.
+BASE ?=
 OVERLAY_IMAGE ?= better-gather:latest
+BASE_IMAGE ?= better-gather-base:latest
+MAX_BASE_AGE_DAYS ?= 60
+
+.PHONY: image-base
+image-base:
+	podman build -t $(BASE_IMAGE) -f Dockerfile.base .
+
+.PHONY: check-base
+check-base:
+	@test -n "$(BASE)" || { echo "set BASE, e.g. BASE=\$$(oc adm release info --image-for=must-gather)"; exit 2; }
+	./hack/check-base.sh --max-age $(MAX_BASE_AGE_DAYS) $(BASE)
 
 .PHONY: image-overlay
 image-overlay:
-	podman build --build-arg BASE=$(BASE) -t $(OVERLAY_IMAGE) -f Dockerfile.overlay .
+	@test -n "$(BASE)" || { echo "set BASE, e.g. BASE=\$$(oc adm release info --image-for=must-gather)"; exit 2; }
+	podman build --build-arg BASE=$(BASE) \
+		--build-arg BASE_BUILT="$$(./hack/check-base.sh --warn-only $(BASE) 2>/dev/null | sed -n 's/^built: \([0-9-]*\).*/\1/p')" \
+		-t $(OVERLAY_IMAGE) -f Dockerfile.overlay .
 
 # Directories containing shell scripts to lint and format
 SCRIPT_DIRS := collection-scripts/ hack/ tests/
