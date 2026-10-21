@@ -47,7 +47,10 @@ trap 'rm -rf "${staging}"' EXIT
 
 # Take the files to port from the source ref rather than the worktree, so the
 # script does not depend on which branch happens to be checked out.
-for f in Dockerfile.base Dockerfile.overlay hack/check-base.sh tests/check_base.bats; do
+# backport_base_edits.py is staged too: the release branch does not have it,
+# so it has to be run from here rather than from the checked-out tree.
+for f in Dockerfile.base Dockerfile.overlay hack/check-base.sh \
+	tests/check_base.bats hack/backport_base_edits.py; do
 	mkdir -p "${staging}/$(dirname "$f")"
 	git show "${SOURCE_REF}:$f" >"${staging}/$f"
 done
@@ -71,7 +74,7 @@ for branch in "${branches[@]}"; do
 		"${staging}/Dockerfile.base" >Dockerfile.base
 	grep -q "^ARG OC_VERSION=stable-${version}$" Dockerfile.base
 
-	python3 hack/backport_base_edits.py "${version}"
+	python3 "${staging}/hack/backport_base_edits.py" "${version}"
 
 	git add -A Dockerfile.base Dockerfile.overlay hack/check-base.sh \
 		tests/check_base.bats Makefile .github/workflows/ci.yml
