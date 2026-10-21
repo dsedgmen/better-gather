@@ -20,3 +20,5 @@
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
 
+# Tooling bootstrapped by hack/tools-from-packages.sh
+/tmp
