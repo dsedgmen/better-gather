@@ -32,7 +32,12 @@ env:
   IMAGE_NAME: better-gather
   # Built here from UBI9 rather than pulled: no public must-gather image has
   # been rebuilt recently enough to ship on.
-  BASE_IMAGE: better-gather-base:ci
+  # Via a scratch registry on the runner, not a bare local tag: buildx's
+  # docker-container driver has its own image store and cannot see what
+  # `--load` put in the docker daemon, so `FROM better-gather-base:ci` in the
+  # overlay would be resolved against Docker Hub and fail. A registry is also
+  # what makes a multi-platform base usable by the overlay build.
+  BASE_IMAGE: localhost:5000/better-gather-base:ci
   MAX_BASE_AGE_DAYS: "60"
 
 jobs:
@@ -70,20 +75,37 @@ jobs:
     permissions:
       contents: read
       packages: write
+
+    services:
+      # Somewhere for the base image to live between the two builds below.
+      # Thrown away with the runner; nothing is published from here.
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
+        with:
+          # So the builder container can reach the registry service on
+          # localhost:5000. BuildKit treats localhost registries as plain
+          # HTTP, so no certificate wrangling is needed.
+          driver-opts: network=host
 
       - name: Build a current base from UBI9
         # No credentials needed, and rebuilt continuously upstream, unlike
         # every public must-gather image.
+        #
+        # Every platform, not just this runner's: the overlay's push step
+        # needs a base manifest covering all of them.
         run: |
           docker buildx build \
-            --platform linux/amd64 \
+            --platform "$PLATFORMS" \
             -f Dockerfile.base \
             -t "$BASE_IMAGE" \
-            --load .
+            --push .
 
       - name: Refuse to ship on a stale base
         run: |
