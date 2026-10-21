@@ -1,0 +1,72 @@
+# A current base for the must-gather overlay.
+#
+# The published images used to layer onto quay.io/openshift/origin-must-gather,
+# which has not been rebuilt since February, and the ODF fork onto an image
+# from July last year. This image adds only shell scripts, so all of that
+# staleness showed up in a scan as though it were ours.
+#
+# There is no fresh *public* must-gather image to use instead -- `latest` is
+# the newest tag any of them publishes. So build a base here from UBI9
+# minimal, which Red Hat rebuilds continuously and which needs no pull
+# credentials, plus the handful of tools the collection scripts actually use.
+#
+#   make image-base
+#   make image-overlay BASE=better-gather-base:latest
+#
+# This is for the published, cluster-agnostic image. If you are collecting
+# from a cluster you have access to, prefer layering onto that cluster's own
+# must-gather image instead -- it carries exactly the CVEs you have already
+# accepted, and its tooling matches the release you are running:
+#
+#   make image-overlay BASE=$(oc adm release info --image-for=must-gather)
+
+ARG UBI=registry.access.redhat.com/ubi9/ubi-minimal:latest
+FROM ${UBI}
+
+# stable tracks the current oc release; pin to e.g. 4.18.21 to match a cluster.
+ARG OC_VERSION=stable-4.21
+# Set automatically per platform by buildx and by podman. Deliberately
+# undefaulted: a default wins over the value the builder supplies, which
+# silently unpacks an x86_64 oc into an arm64 image. uname -m is the fallback
+# for a builder that sets neither.
+ARG TARGETARCH
+
+# What the collection scripts need, and nothing else:
+#   tar gzip        archive handling, and oc cp/rsync require tar in the image
+#   jq              trim_jsonl_since, gather_apirequestcounts
+#   rsync           oc rsync, and the copy sidecar
+#   findutils       find, including -newermt for the --since window
+#   util-linux      flock for the task counter, column for gather_virt
+#   procps-ng       pkill, used by oc's own disk-usage checker
+#   gawk sed grep   text handling throughout
+#   tzdata          so date -d and timestamps resolve sensibly
+RUN microdnf install -y --nodocs --setopt=install_weak_deps=0 \
+        tar gzip jq rsync findutils util-linux procps-ng gawk sed grep \
+        curl-minimal ca-certificates tzdata bash \
+    && microdnf clean all \
+    && rm -rf /var/cache/yum
+
+RUN set -eux; \
+    want="${TARGETARCH:-$(uname -m)}"; \
+    case "${want}" in \
+        amd64 | x86_64)  arch=x86_64  ;; \
+        arm64 | aarch64) arch=arm64   ;; \
+        s390x)           arch=s390x   ;; \
+        ppc64le)         arch=ppc64le ;; \
+        *) echo "unsupported architecture: ${want}" >&2; exit 1 ;; \
+    esac; \
+    curl -sSLf --retry 3 \
+        "https://mirror.openshift.com/pub/openshift-v4/${arch}/clients/ocp/${OC_VERSION}/openshift-client-linux.tar.gz" \
+        | tar xz -C /usr/bin oc kubectl; \
+    chmod +x /usr/bin/oc /usr/bin/kubectl; \
+    oc version --client
+
+# must-gather runs with / as the working directory: the collection scripts
+# mix 'must-gather' and '../must-gather' relative paths, which only agree
+# from there.
+WORKDIR /
+
+LABEL io.k8s.display-name="better-gather-base" \
+      io.k8s.description="Current UBI9 base carrying the tools the must-gather collection scripts use"
+
+ENTRYPOINT ["/bin/bash"]
