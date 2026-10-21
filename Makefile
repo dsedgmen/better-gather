@@ -61,12 +61,18 @@ check-base:
 # scans and keeps the reports as artifacts.
 #
 #   hack/tools-from-packages.sh trivy     # not in the default tool set
+#
+# vendor/ is skipped: it is third-party code this repo does not build, and it
+# carries Kubernetes test fixtures that trip every pod-security rule. Module
+# vulnerabilities are still found, because those come from go.mod rather than
+# from the vendored sources.
 SCAN_SEVERITY ?= HIGH,CRITICAL
 
 .PHONY: scan-code
 scan-code:
 	@test -x "$(TRIVY)" || { echo "run: ./hack/tools-from-packages.sh trivy"; exit 2; }
 	$(TRIVY) filesystem --scanners vuln,secret,misconfig \
+		--skip-dirs '**/vendor' \
 		--severity $(SCAN_SEVERITY) --exit-code 0 .
 
 # Via a saved archive rather than the image store: rootless podman has no

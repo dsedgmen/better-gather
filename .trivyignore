@@ -12,7 +12,4 @@
 # Dockerfile has no USER line either, and adding one would stop the image
 # collecting anything.
 #
-# Also fires on vendor/github.com/openshift/build-machinery-go/
-# Dockerfile.commitchecker, which is vendored upstream tooling and not built
-# by this repo at all.
 DS-0002

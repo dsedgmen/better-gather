@@ -50,17 +50,23 @@ load test_helper
 }
 
 # Accepted scanner findings have to carry a reason, or .trivyignore quietly
-# becomes the place inconvenient results go.
+# becomes the place inconvenient results go. A comment block documents every
+# entry under it until the next blank line, so a group of related rules can
+# share one explanation.
 @test "every .trivyignore entry is commented" {
 	ignore="${PROJECT_ROOT}/.trivyignore"
 	[ -f "$ignore" ]
-	while IFS= read -r line; do
-		[[ -z "$line" || "$line" == \#* ]] && continue
-		# The line above an entry must be part of a comment block.
-		run grep -B1 "^${line}$" "$ignore"
-		[[ "$output" == *"#"* ]] || {
-			echo "undocumented .trivyignore entry: ${line}" >&2
-			return 1
-		}
+	documented=false
+	undocumented=()
+	while IFS= read -r line || [ -n "$line" ]; do
+		case "$line" in
+		"") documented=false ;;
+		\#*) documented=true ;;
+		*) [ "$documented" = true ] || undocumented+=("$line") ;;
+		esac
 	done <"$ignore"
+	[ ${#undocumented[@]} -eq 0 ] || {
+		echo "undocumented .trivyignore entries: ${undocumented[*]}" >&2
+		return 1
+	}
 }
