@@ -30,6 +30,10 @@ on:
 env:
   PLATFORMS: linux/amd64
   IMAGE_NAME: better-gather
+  # Built here from UBI9 rather than pulled: no public must-gather image has
+  # been rebuilt recently enough to ship on.
+  BASE_IMAGE: better-gather-base:ci
+  MAX_BASE_AGE_DAYS: "60"
 
 jobs:
   lint-and-test:
