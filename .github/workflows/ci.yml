@@ -23,7 +23,15 @@ on:
   workflow_dispatch:
 
 env:
-  PUBLIC_BASE: quay.io/openshift/origin-must-gather:latest
+  # Built here from UBI9 rather than pulled: no public must-gather image
+  # has been rebuilt recently enough to ship on.
+  #
+  # Via a scratch registry on the runner, not a bare local tag: buildx's
+  # docker-container driver has its own image store and cannot see what
+  # `--load` put in the docker daemon, so the overlay's FROM would be
+  # resolved against Docker Hub and fail.
+  BASE_IMAGE: localhost:5000/better-gather-base:4.22
+  MAX_BASE_AGE_DAYS: "60"
   PLATFORMS: linux/amd64
   IMAGE_NAME: better-gather
 
@@ -62,10 +70,39 @@ jobs:
     permissions:
       contents: read
       packages: write
+    services:
+      # Somewhere for the base image to live between the two builds below.
+      # Thrown away with the runner; nothing is published from here.
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
+        with:
+          # So the builder container can reach the registry service on
+          # localhost:5000. BuildKit treats localhost registries as plain
+          # HTTP, so no certificate wrangling is needed.
+          driver-opts: network=host
+
+      - name: Build a 4.22 base from UBI9
+        # No credentials needed, and rebuilt continuously upstream, unlike
+        # every public must-gather image. oc is pinned to this branch's
+        # minor so the image ships a matching client.
+        run: |
+          docker buildx build \
+            --platform "$PLATFORMS" \
+            -f Dockerfile.base \
+            -t "$BASE_IMAGE" \
+            --push .
+
+      - name: Refuse to ship on a stale base
+        run: |
+          ./hack/check-base.sh --max-age "$MAX_BASE_AGE_DAYS" \
+            registry.access.redhat.com/ubi9/ubi-minimal:latest
 
       - name: Build for this runner and load it, so it can be tested
         # Multi-platform builds cannot be --load'ed into the local docker, so
@@ -75,7 +112,8 @@ jobs:
         run: |
           docker buildx build \
             --platform linux/amd64 \
-            --build-arg BASE="$PUBLIC_BASE" \
+            --build-arg BASE="$BASE_IMAGE" \
+            --build-arg BASE_BUILT="$(date -u +%Y-%m-%d)" \
             -f Dockerfile.overlay \
             -t "$IMAGE_NAME:ci" \
             --load .
@@ -160,7 +198,8 @@ jobs:
         run: |
           docker buildx build \
             --platform "$PLATFORMS" \
-            --build-arg BASE="$PUBLIC_BASE" \
+            --build-arg BASE="$BASE_IMAGE" \
+            --build-arg BASE_BUILT="$(date -u +%Y-%m-%d)" \
             -f Dockerfile.overlay \
             $(echo "${{ steps.tags.outputs.tags }}" | tr "," "\n" | sed "s/^/--tag /" | tr "\n" " ") \
             --push .
