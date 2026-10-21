@@ -67,6 +67,9 @@ RUN set -eux; \
 WORKDIR /
 
 LABEL io.k8s.display-name="better-gather-base" \
-      io.k8s.description="Current UBI9 base carrying the tools the must-gather collection scripts use"
+      io.k8s.description="Current UBI9 base carrying the tools the must-gather collection scripts use. Not a Red Hat product." \
+      better-gather.disclaimer="Not a Red Hat product: built from ubi9/ubi-minimal by an unofficial project, unsupported, no warranty." \
+      org.opencontainers.image.vendor="dsedgmen (unofficial -- not Red Hat)" \
+      org.opencontainers.image.source="https://github.com/dsedgmen/better-gather"
 
 ENTRYPOINT ["/bin/bash"]

@@ -55,6 +55,36 @@ check-base:
 	@test -n "$(BASE)" || { echo "set BASE, e.g. BASE=\$$(oc adm release info --image-for=must-gather)"; exit 2; }
 	./hack/check-base.sh --max-age $(MAX_BASE_AGE_DAYS) $(BASE)
 
+# Security scanning. Reporting only -- nothing here fails a build, by
+# design: an unfixed CVE in the base is not something this repo can action,
+# and a gate that cannot be satisfied just gets ignored. CI runs the same two
+# scans and keeps the reports as artifacts.
+#
+#   hack/tools-from-packages.sh trivy     # not in the default tool set
+SCAN_SEVERITY ?= HIGH,CRITICAL
+
+.PHONY: scan-code
+scan-code:
+	@test -x "$(TRIVY)" || { echo "run: ./hack/tools-from-packages.sh trivy"; exit 2; }
+	$(TRIVY) filesystem --scanners vuln,secret,misconfig \
+		--severity $(SCAN_SEVERITY) --exit-code 0 .
+
+# Via a saved archive rather than the image store: rootless podman has no
+# socket for trivy to talk to unless podman.socket happens to be running, and
+# --input works the same everywhere.
+.PHONY: scan-image
+scan-image:
+	@test -x "$(TRIVY)" || { echo "run: ./hack/tools-from-packages.sh trivy"; exit 2; }
+	@set -e; \
+	tmpdir="$$(mktemp -d)"; \
+	trap 'rm -rf "$$tmpdir"' EXIT; \
+	podman save --format docker-archive -o "$$tmpdir/image.tar" $(OVERLAY_IMAGE); \
+	$(TRIVY) image --input "$$tmpdir/image.tar" --scanners vuln \
+		--severity $(SCAN_SEVERITY) --exit-code 0
+
+.PHONY: scan
+scan: scan-code scan-image
+
 .PHONY: image-overlay
 image-overlay:
 	@test -n "$(BASE)" || { echo "set BASE, e.g. BASE=\$$(oc adm release info --image-for=must-gather)"; exit 2; }
@@ -84,6 +114,7 @@ LOCALBIN ?= $(shell pwd)/tmp/bin
 BATS ?= $(LOCALBIN)/bats
 SHFMT ?= $(LOCALBIN)/shfmt
 SHELLCHECK ?= $(LOCALBIN)/shellcheck
+TRIVY ?= $(LOCALBIN)/trivy
 
 # NOTE: please keep this list sorted so that it can be easily searched
 TOOLS = bats \

@@ -1,0 +1,18 @@
+# Findings this project has looked at and accepted. Anything not listed here
+# is reported by `make scan-code` and by CI.
+#
+# Nothing in this file suppresses a vulnerability. It is misconfiguration
+# rules only, and each one needs a reason.
+
+# DS-0002: "Specify at least 1 USER command in Dockerfile with non-root user"
+#
+# A must-gather image cannot run as a non-root user. It reads /host on the
+# node through a privileged debug pod, runs `oc adm node-logs` against the
+# kubelet, and writes into a directory the copy sidecar owns. Upstream's own
+# Dockerfile has no USER line either, and adding one would stop the image
+# collecting anything.
+#
+# Also fires on vendor/github.com/openshift/build-machinery-go/
+# Dockerfile.commitchecker, which is vendored upstream tooling and not built
+# by this repo at all.
+DS-0002
