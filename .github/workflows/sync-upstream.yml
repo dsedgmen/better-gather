@@ -1,0 +1,45 @@
+# Fetch the upstream must-gather and keep this fork current.
+#
+# - main: open a sync PR that merges upstream/main
+# - existing release-*: open a sync PR after a full re-apply backport
+# - new upstream release-* (>= floor): publish origin/release-X.Y after a
+#   successful full backport, and open a tracking Issue
+#
+# Does not auto-merge. Image publishes stay on ci.yml.
+
+name: sync-upstream
+
+on:
+  schedule:
+    - cron: "15 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch all origin branches
+        run: git fetch origin --prune '+refs/heads/*:refs/remotes/origin/*'
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync with upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_URL: https://github.com/openshift/must-gather.git
+          IMAGE_NAME: better-gather
+          ENABLE_RELEASE_SYNC: "1"
+        run: ./hack/sync-upstream.sh
