@@ -12,10 +12,15 @@
 #
 #   hack/backport-disclaimer.sh release-4.18 release-4.19 ...
 #   hack/backport-disclaimer.sh --all
+#   hack/backport-disclaimer.sh --onto-head release-4.18
 #
 # Run from a clean tree on main. Each branch is reset and cleaned first:
 # leftovers from the previous branch leaking into the next one is a mistake
 # this repo has already made once.
+#
+# --onto-head skips the reset to origin/<branch> and applies onto the current
+# tip of that branch. Used by hack/sync-upstream.sh after backport.sh so the
+# just-refreshed tree is not wiped.
 
 set -eu -o pipefail
 
@@ -23,15 +28,27 @@ cd "$(git rev-parse --show-toplevel)"
 
 SOURCE_REF=main
 
+ONTO_HEAD=0
 branches=()
-if [[ "${1:-}" == "--all" ]]; then
-	mapfile -t branches < <(git for-each-ref --format='%(refname:short)' 'refs/heads/release-*' | sort -V)
-else
-	branches=("$@")
-fi
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--onto-head)
+		ONTO_HEAD=1
+		shift
+		;;
+	--all)
+		mapfile -t branches < <(git for-each-ref --format='%(refname:short)' 'refs/heads/release-*' | sort -V)
+		shift
+		;;
+	*)
+		branches+=("$1")
+		shift
+		;;
+	esac
+done
 
 if [[ ${#branches[@]} -eq 0 ]]; then
-	echo "usage: ${BASH_SOURCE[0]##*/} [--all | release-4.18 ...]" >&2
+	echo "usage: ${BASH_SOURCE[0]##*/} [--onto-head] [--all | release-4.18 ...]" >&2
 	exit 2
 fi
 
@@ -59,8 +76,10 @@ for branch in "${branches[@]}"; do
 	echo "=== ${branch}"
 
 	git checkout -q "${branch}"
-	git reset -q --hard "origin/${branch}"
-	git clean -qfd
+	if [[ "${ONTO_HEAD}" -eq 0 ]]; then
+		git reset -q --hard "origin/${branch}"
+		git clean -qfd
+	fi
 
 	cp "${staging}/DISCLAIMER" DISCLAIMER
 	cp "${staging}/.trivyignore" .trivyignore

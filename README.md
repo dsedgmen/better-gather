@@ -258,13 +258,25 @@ branches: it asserts REDUCE_LOGS and rotated-pod-log behaviour that the
 
 ## Staying current with upstream
 
-```console
-$ git fetch upstream && git rebase upstream/main
-```
+A scheduled workflow (`.github/workflows/sync-upstream.yml`) fetches
+[openshift/must-gather](https://github.com/openshift/must-gather) daily and:
 
-The changes are deliberately small and separable, each in its own commit, so
-they stay rebasable — and so the ones that are genuinely upstream bugs (the
-duration truncation, the shellcheck failures) could be sent as PRs.
+- opens a sync PR when `main` lags `upstream/main`
+- opens a sync PR for each existing `release-*` that lags its upstream twin
+  (full re-apply of --since, UBI9 base, and disclaimer — not a cherry-pick)
+- publishes a new `release-X.Y` when upstream adds one at or above this fork's
+  floor (oldest existing `release-*`, today 4.18), after a successful full
+  backport — never a bare upstream push
+
+Sync PRs are labeled `upstream-sync` and wait for CI; they are not auto-merged.
+The fork commits stay small and separable so merges stay reviewable — and so
+the ones that are genuinely upstream bugs (the duration truncation, the
+shellcheck failures) could still be sent as PRs upstream.
+
+```console
+$ hack/sync-upstream.sh           # needs gh, a clean tree, and push access
+$ hack/sync-upstream.sh --dry-run
+```
 
 ---
 
