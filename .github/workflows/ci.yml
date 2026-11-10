@@ -4,9 +4,10 @@
 # so this is what stands in for it.
 #
 # The lint and test job runs inside a Fedora container on purpose:
-# hack/tools-from-packages.sh gets bats, shellcheck and shfmt from the
-# distribution rather than downloading release binaries from GitHub, and that
-# needs dnf. It is the same path used locally, so CI and a laptop agree.
+# hack/tools-from-packages.sh gets bats and shellcheck from the distribution
+# rather than downloading release binaries from GitHub, and that needs dnf.
+# It is the same path used locally, so CI and a laptop agree. shfmt is not
+# packaged on current Fedora and is not required for bats-check.
 #
 # The image is built on a base this repo produces from UBI9 minimal, which
 # Red Hat rebuilds continuously and which needs no pull credentials. It used
@@ -60,7 +61,9 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Bootstrap tooling from the distribution
-        run: ./hack/tools-from-packages.sh
+        # Explicit list: the script's default matches this, and naming the
+        # tools keeps CI honest about what bats-check actually needs.
+        run: ./hack/tools-from-packages.sh bats shellcheck
 
       - name: Lint and run the shell tests
         # bats-check rather than upstream's `test`: build-machinery-go

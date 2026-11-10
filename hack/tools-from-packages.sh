@@ -145,12 +145,18 @@ main() {
 	require rpm2cpio
 	require cpio
 
-	# trivy is deliberately not in the default set: it is a ~78 MB download
-	# that only `make scan-*` needs, and nothing in lint or test uses it.
+	# Default set is what bats-check needs. shfmt used to be here too, but
+	# current Fedora no longer packages it (fedora:latest has no shfmt rpm),
+	# and CI only runs lint+test. For formatting: `make shfmt` falls back to
+	# hack/tools.sh and downloads the release binary.
+	#
+	# trivy is deliberately not in the default set either: it is a ~78 MB
+	# download that only `make scan-*` needs.
 	#   hack/tools-from-packages.sh trivy
+	#   hack/tools-from-packages.sh shfmt
 	local tools=("$@")
 	if [[ ${#tools[@]} -eq 0 ]]; then
-		tools=(bats shellcheck shfmt)
+		tools=(bats shellcheck)
 	fi
 
 	local tool
