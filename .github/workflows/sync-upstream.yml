@@ -39,6 +39,7 @@ jobs:
       - name: Sync with upstream
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           UPSTREAM_URL: https://github.com/openshift/must-gather.git
           IMAGE_NAME: better-gather
           ENABLE_RELEASE_SYNC: "1"

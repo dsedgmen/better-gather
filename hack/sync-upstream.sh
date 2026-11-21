@@ -25,6 +25,19 @@ ENABLE_RELEASE_SYNC="${ENABLE_RELEASE_SYNC:-1}"
 RELEASE_FLOOR="${RELEASE_FLOOR:-}"
 LABEL="upstream-sync"
 
+# Pin gh to this fork. After we add the upstream remote, bare `gh` commands
+# may resolve to openshift/must-gather and PR create/list fail there.
+if [[ -z "${GH_REPO:-}" ]]; then
+	if [[ -n "${GITHUB_REPOSITORY:-}" ]]; then
+		export GH_REPO="${GITHUB_REPOSITORY}"
+	else
+		_origin_url="$(git remote get-url origin)"
+		export GH_REPO="$(printf '%s' "${_origin_url}" |
+			sed -E 's#^(git@github\.com:|https://github\.com/)##; s#\.git$##')"
+		unset _origin_url
+	fi
+fi
+
 DRY_RUN=0
 if [[ "${1:-}" == "--dry-run" ]] || [[ "${DRY_RUN:-0}" == "1" ]]; then
 	DRY_RUN=1
@@ -61,26 +74,50 @@ ensure_label() {
 		--color "0E8A16" 2>/dev/null || true
 }
 
+find_open_pr() {
+	local base="$1" head="$2"
+	local owner num
+	owner="${GH_REPO%%/*}"
+	# REST requires owner:branch for head=; more reliable than gh pr list --head.
+	num="$(gh api "repos/${GH_REPO}/pulls?state=open&head=${owner}:${head}&base=${base}" \
+		--jq '.[0].number // empty' 2>/dev/null || true)"
+	if [[ -z "${num}" ]]; then
+		num="$(gh pr view "${head}" --json number,state,baseRefName \
+			--jq "select(.state == \"OPEN\" and .baseRefName == \"${base}\") | .number" \
+			2>/dev/null || true)"
+	fi
+	printf '%s' "${num}"
+}
+
 open_or_update_pr() {
 	local base="$1" head="$2" title="$3" body="$4"
 	if [[ "${DRY_RUN}" -eq 1 ]]; then
 		log "DRY-RUN: would open/update PR ${head} -> ${base}: ${title}"
 		return 0
 	fi
-	local existing
-	existing="$(gh pr list --state open --base "${base}" --head "${head}" \
-		--json number --jq '.[0].number // empty')"
+	local existing url
+	existing="$(find_open_pr "${base}" "${head}")"
 	if [[ -n "${existing}" ]]; then
 		gh pr edit "${existing}" --title "${title}" --body "${body}" >/dev/null
 		gh pr edit "${existing}" --add-label "${LABEL}" >/dev/null 2>&1 || true
 		log "Updated PR #${existing}: ${head} -> ${base}"
-	else
-		local url
-		url="$(gh pr create --base "${base}" --head "${head}" \
-			--title "${title}" --body "${body}")"
+		return 0
+	fi
+	if url="$(gh pr create --base "${base}" --head "${head}" \
+		--title "${title}" --body "${body}" 2>/dev/null)"; then
 		gh pr edit "${url}" --add-label "${LABEL}" >/dev/null 2>&1 || true
 		log "Opened PR: ${url}"
+		return 0
 	fi
+	# Race or misleading create error: recover if a PR already exists.
+	existing="$(find_open_pr "${base}" "${head}")"
+	if [[ -n "${existing}" ]]; then
+		gh pr edit "${existing}" --title "${title}" --body "${body}" >/dev/null
+		gh pr edit "${existing}" --add-label "${LABEL}" >/dev/null 2>&1 || true
+		log "Updated PR #${existing}: ${head} -> ${base}"
+		return 0
+	fi
+	die "could not open or find PR ${head} -> ${base} on ${GH_REPO}"
 }
 
 open_issue() {
@@ -260,6 +297,7 @@ main() {
 		fi
 	fi
 
+	log "Using GH_REPO=${GH_REPO}"
 	ensure_upstream_remote
 	log "Fetching origin and upstream..."
 	git fetch origin --prune
