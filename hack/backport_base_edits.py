@@ -77,74 +77,101 @@ def patch_makefile(version):
 def patch_workflow(version):
     p = pathlib.Path(".github/workflows/ci.yml")
     s = p.read_text()
+    pinned = f"BASE_IMAGE: localhost:5000/better-gather-base:{version}\n"
 
-    s = replace(
-        s,
-        "  PUBLIC_BASE: quay.io/openshift/origin-must-gather:latest\n",
-        "  # Built here from UBI9 rather than pulled: no public must-gather image\n"
-        "  # has been rebuilt recently enough to ship on.\n"
-        "  #\n"
-        "  # Via a scratch registry on the runner, not a bare local tag: buildx's\n"
-        "  # docker-container driver has its own image store and cannot see what\n"
-        "  # `--load` put in the docker daemon, so the overlay's FROM would be\n"
-        "  # resolved against Docker Hub and fail.\n"
-        f"  BASE_IMAGE: localhost:5000/better-gather-base:{version}\n"
-        "  MAX_BASE_AGE_DAYS: \"60\"\n",
-        "ci.yml PUBLIC_BASE",
-    )
+    if pinned in s:
+        # Already version-pinned (re-run onto a branch that has the base work).
+        pass
+    elif "BASE_IMAGE: localhost:5000/better-gather-base:ci\n" in s:
+        # backport.sh copies main's ci.yml via OURS; that already has the UBI9
+        # base workflow, so only the image tag and step title need pinning.
+        s = replace(
+            s,
+            "BASE_IMAGE: localhost:5000/better-gather-base:ci\n",
+            pinned,
+            "ci.yml BASE_IMAGE tag",
+        )
+        s = replace(
+            s,
+            "      - name: Build a current base from UBI9\n",
+            f"      - name: Build a {version} base from UBI9\n",
+            "ci.yml base build step name",
+        )
+    elif "  PUBLIC_BASE: quay.io/openshift/origin-must-gather:latest\n" in s:
+        s = replace(
+            s,
+            "  PUBLIC_BASE: quay.io/openshift/origin-must-gather:latest\n",
+            "  # Built here from UBI9 rather than pulled: no public must-gather image\n"
+            "  # has been rebuilt recently enough to ship on.\n"
+            "  #\n"
+            "  # Via a scratch registry on the runner, not a bare local tag: buildx's\n"
+            "  # docker-container driver has its own image store and cannot see what\n"
+            "  # `--load` put in the docker daemon, so the overlay's FROM would be\n"
+            "  # resolved against Docker Hub and fail.\n"
+            f"  {pinned}"
+            "  MAX_BASE_AGE_DAYS: \"60\"\n",
+            "ci.yml PUBLIC_BASE",
+        )
 
-    s = replace(
-        s,
-        "    steps:\n"
-        "      - uses: actions/checkout@v4\n"
-        "\n"
-        "      - uses: docker/setup-buildx-action@v3\n",
-        "    services:\n"
-        "      # Somewhere for the base image to live between the two builds below.\n"
-        "      # Thrown away with the runner; nothing is published from here.\n"
-        "      registry:\n"
-        "        image: registry:2\n"
-        "        ports:\n"
-        "          - 5000:5000\n"
-        "\n"
-        "    steps:\n"
-        "      - uses: actions/checkout@v4\n"
-        "\n"
-        "      - uses: docker/setup-buildx-action@v3\n"
-        "        with:\n"
-        "          # So the builder container can reach the registry service on\n"
-        "          # localhost:5000. BuildKit treats localhost registries as plain\n"
-        "          # HTTP, so no certificate wrangling is needed.\n"
-        "          driver-opts: network=host\n"
-        "\n"
-        f"      - name: Build a {version} base from UBI9\n"
-        "        # No credentials needed, and rebuilt continuously upstream, unlike\n"
-        "        # every public must-gather image. oc is pinned to this branch's\n"
-        "        # minor so the image ships a matching client.\n"
-        "        run: |\n"
-        "          docker buildx build \\\n"
-        "            --platform \"$PLATFORMS\" \\\n"
-        "            -f Dockerfile.base \\\n"
-        "            -t \"$BASE_IMAGE\" \\\n"
-        "            --push .\n"
-        "\n"
-        "      - name: Refuse to ship on a stale base\n"
-        "        run: |\n"
-        "          ./hack/check-base.sh --max-age \"$MAX_BASE_AGE_DAYS\" \\\n"
-        "            registry.access.redhat.com/ubi9/ubi-minimal:latest\n",
-        "ci.yml steps",
-    )
+        s = replace(
+            s,
+            "    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "\n"
+            "      - uses: docker/setup-buildx-action@v3\n",
+            "    services:\n"
+            "      # Somewhere for the base image to live between the two builds below.\n"
+            "      # Thrown away with the runner; nothing is published from here.\n"
+            "      registry:\n"
+            "        image: registry:2\n"
+            "        ports:\n"
+            "          - 5000:5000\n"
+            "\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "\n"
+            "      - uses: docker/setup-buildx-action@v3\n"
+            "        with:\n"
+            "          # So the builder container can reach the registry service on\n"
+            "          # localhost:5000. BuildKit treats localhost registries as plain\n"
+            "          # HTTP, so no certificate wrangling is needed.\n"
+            "          driver-opts: network=host\n"
+            "\n"
+            f"      - name: Build a {version} base from UBI9\n"
+            "        # No credentials needed, and rebuilt continuously upstream, unlike\n"
+            "        # every public must-gather image. oc is pinned to this branch's\n"
+            "        # minor so the image ships a matching client.\n"
+            "        run: |\n"
+            "          docker buildx build \\\n"
+            "            --platform \"$PLATFORMS\" \\\n"
+            "            -f Dockerfile.base \\\n"
+            "            -t \"$BASE_IMAGE\" \\\n"
+            "            --push .\n"
+            "\n"
+            "      - name: Refuse to ship on a stale base\n"
+            "        run: |\n"
+            "          ./hack/check-base.sh --max-age \"$MAX_BASE_AGE_DAYS\" \\\n"
+            "            registry.access.redhat.com/ubi9/ubi-minimal:latest\n",
+            "ci.yml steps",
+        )
 
-    s = replace(
-        s,
-        '            --build-arg BASE="$PUBLIC_BASE" \\',
-        '            --build-arg BASE="$BASE_IMAGE" \\\n'
-        '            --build-arg BASE_BUILT="$(date -u +%Y-%m-%d)" \\',
-        "ci.yml build args",
-    )
+        s = replace(
+            s,
+            '            --build-arg BASE="$PUBLIC_BASE" \\',
+            '            --build-arg BASE="$BASE_IMAGE" \\\n'
+            '            --build-arg BASE_BUILT="$(date -u +%Y-%m-%d)" \\',
+            "ci.yml build args",
+        )
+    else:
+        raise SystemExit(
+            "backport_base_edits: ci.yml: unrecognized base setup "
+            "(expected PUBLIC_BASE, BASE_IMAGE:ci, or already-pinned tag)"
+        )
 
     if "PUBLIC_BASE" in s:
         raise SystemExit("backport_base_edits: PUBLIC_BASE still referenced")
+    if pinned not in s:
+        raise SystemExit(f"backport_base_edits: ci.yml missing pinned {version} BASE_IMAGE")
 
     yaml.safe_load(s)  # refuse to write YAML that does not parse
     p.write_text(s)

@@ -60,7 +60,7 @@ fi
 
 start_branch="$(git rev-parse --abbrev-ref HEAD)"
 staging="$(mktemp -d)"
-trap 'rm -rf "${staging}"' EXIT
+trap 'rm -rf "${staging}"; git checkout -q "${start_branch}" 2>/dev/null || true' EXIT
 
 # Take the files to port from the source ref rather than the worktree, so the
 # script does not depend on which branch happens to be checked out.
@@ -126,7 +126,6 @@ for branch in "${branches[@]}"; do
 	echo "    committed $(git rev-parse --short HEAD)"
 done
 
-git checkout -q "${start_branch}"
 echo
 echo "done. Review with: git log --oneline ${branches[0]} -1"
 echo "Push with:        git push origin ${branches[*]}"

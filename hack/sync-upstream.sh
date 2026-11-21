@@ -158,8 +158,13 @@ refresh_release() {
 	local version="$1"
 	local branch="release-${version}"
 	log "Refreshing ${branch} from upstream/${branch}"
+	# Helpers live on main (and are not in release trees). Always invoke them
+	# from main; each script checks out ${branch} itself and restores after.
+	git checkout -q main
 	./hack/backport.sh "${version}"
+	git checkout -q main
 	./hack/backport-base.sh --onto-head "${branch}"
+	git checkout -q main
 	./hack/backport-disclaimer.sh --onto-head "${branch}"
 }
 
