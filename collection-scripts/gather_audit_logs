@@ -6,6 +6,16 @@
 source $(dirname "$0")/common.sh
 get_log_collection_args
 
+# oc drops --since for a --path request and the kubelet does not time-filter
+# file serving, so the arguments threaded through below have no effect on
+# their own. Apply the window here instead.
+# shellcheck source=collection-scripts/since_common.sh
+SINCE_COMMON="$(dirname "$0")/since_common.sh"
+source "${SINCE_COMMON}"
+export SINCE_COMMON
+get_since_cutoff
+since_report_header
+
 BASE_COLLECTION_PATH="${BASE_COLLECTION_PATH:-/must-gather}"
 
 profile=$(oc get apiservers.v1.config.openshift.io -o jsonpath='{.items[0].spec.audit.profile}')
@@ -45,12 +55,13 @@ for path in "${paths[@]}"; do
 		tee "${BASE_COLLECTION_PATH}/audit_logs/$path.audit_logs_listing" |
 		grep -v ".terminating" |
 		grep -v ".lock" |
+		filter_names_since "audit_logs/$path" |
 		sed "s|^|$path $output_dir |" |
 		sed "s|$| '${node_log_collection_args}'|"
 done |
 	xargs --max-args=5 --max-procs=45 bash -c \
 		'echo "INFO: Started  downloading $1/$4 from $3";
-  oc adm node-logs ${5:+"$5"} $3 --path=$1/$4 | gzip > $2/$3-$4.gz;
+  source "${SINCE_COMMON}"; oc adm node-logs ${5:+"$5"} $3 --path=$1/$4 | trim_jsonl_since | gzip > $2/$3-$4.gz;
   echo "INFO: Finished downloading $1/$4 from $3"' \
 		bash
 
