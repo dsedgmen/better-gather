@@ -38,7 +38,7 @@ env:
   # `--load` put in the docker daemon, so `FROM better-gather-base:ci` in the
   # overlay would be resolved against Docker Hub and fail. A registry is also
   # what makes a multi-platform base usable by the overlay build.
-  BASE_IMAGE: localhost:5000/better-gather-base:ci
+  BASE_IMAGE: localhost:5000/better-gather-base:5.1
   MAX_BASE_AGE_DAYS: "60"
 
 jobs:
@@ -143,7 +143,7 @@ jobs:
           # HTTP, so no certificate wrangling is needed.
           driver-opts: network=host
 
-      - name: Build a current base from UBI9
+      - name: Build a 5.1 base from UBI9
         # No credentials needed, and rebuilt continuously upstream, unlike
         # every public must-gather image.
         #
