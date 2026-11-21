@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+#
+# Create (or refresh) a release-X.Y backport branch from the matching
+# upstream branch.
+#
+# These are real backports, not cherry-picks: release-4.18 is 93 commits and
+# 41 collection scripts behind main, so replaying our commits would drag
+# unrelated upstream changes with them. Instead the branch starts from
+# upstream's own release branch and the --since work is re-applied onto it:
+#
+#   * files that are entirely ours are taken from main verbatim -- the
+#     library, the tests, the hack scripts, the Dockerfile, the workflow;
+#   * upstream's own collection scripts are edited in place, matching the
+#     text as it exists on *that* branch.
+#
+# Every edit reports whether it matched, so a branch where upstream has moved
+# the ground under us fails loudly instead of silently producing a branch
+# that looks fine and collects everything.
+#
+#   hack/backport.sh 4.18
+#   hack/backport.sh 4.18 4.19 4.20 4.21 4.22 4.23
+#
+# Verify afterwards with: make GO_REQUIRED_MIN_VERSION:= bats-check
+
+set -eu -o pipefail
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+declare -r PROJECT_ROOT
+cd "$PROJECT_ROOT"
+
+SOURCE_BRANCH="${SOURCE_BRANCH:-main}"
+
+# Files that exist only because of this fork. Safe to take wholesale: there
+# is no upstream version to conflict with.
+OURS=(
+	collection-scripts/since_common.sh
+	hack/tools-from-packages.sh
+	hack/sync-since-lib.sh
+	hack/try-on-cluster.sh
+	hack/backport.sh
+	hack/backport_edits.py
+	tests/bats_assert_fallback.bash
+	tests/since_common.bats
+	tests/test_helper.bash
+	Dockerfile.overlay
+	.github/workflows/ci.yml
+)
+
+backport_one() {
+	local version="$1"
+	local branch="release-${version}"
+	local upstream="upstream/${branch}"
+
+	echo "=============================================================="
+	echo "  ${branch}"
+	echo "=============================================================="
+
+	if ! git rev-parse --verify --quiet "${upstream}" >/dev/null; then
+		echo "SKIP: ${upstream} does not exist" >&2
+		return 1
+	fi
+
+	# Start from a genuinely clean tree. Without this the previous
+	# branch's edits survive the checkout and the next branch reports
+	# them as "already applied" while carrying another release's code.
+	git reset -q --hard
+	git clean -qfd -e tmp
+	git checkout -q -B "${branch}" "${upstream}"
+	git reset -q --hard "${upstream}"
+	git clean -qfd -e tmp
+
+	local f
+	for f in "${OURS[@]}"; do
+		mkdir -p "$(dirname "$f")"
+		git checkout -q "${SOURCE_BRANCH}" -- "$f" 2>/dev/null ||
+			echo "  note: ${SOURCE_BRANCH} has no ${f}"
+	done
+
+	# Deliberately *not* copying main's tests/ wholesale onto branches that
+	# have none of their own. main's common.bats asserts upstream behaviour
+	# that differs by release -- REDUCE_LOGS and rotated-pod-logs handling
+	# do not exist in the 4.18-era common.sh -- so it would fail for reasons
+	# that have nothing to do with this backport. Only the three files that
+	# test *our* code come across, and they are in OURS above.
+	if [ ! -f tests/common.bats ]; then
+		echo "  note: branch has no upstream bats suite; testing our code only"
+	fi
+
+	python3 hack/backport_edits.py || return 1
+
+	git add -A
+	if git diff --cached --quiet; then
+		echo "  nothing to do"
+		return 0
+	fi
+	git commit -q -F - <<EOF
+Backport the --since work to ${version}
+
+Re-applied onto upstream/${branch} rather than cherry-picked: that branch is
+far enough behind main that replaying the commits would carry unrelated
+upstream changes with them.
+
+See the README for what this changes and why. The same bats suite runs here,
+and CI builds and publishes ghcr.io/dsedgmen/<image>:${version}.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+EOF
+	echo "  committed $(git rev-parse --short=8 HEAD)"
+}
+
+ORIGINAL_BRANCH=""
+
+main() {
+	ORIGINAL_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+	trap 'git checkout -q "${ORIGINAL_BRANCH:-main}" 2>/dev/null || true' EXIT
+
+	if [ "$#" -eq 0 ]; then
+		echo "usage: ${BASH_SOURCE[0]##*/} <version>..." >&2
+		exit 2
+	fi
+
+	local v failed=0
+	for v in "$@"; do
+		backport_one "$v" || failed=$((failed + 1))
+	done
+
+	[ "$failed" -eq 0 ] || {
+		echo "${failed} branch(es) failed" >&2
+		exit 1
+	}
+}
+
+main "$@"
