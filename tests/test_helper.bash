@@ -5,13 +5,18 @@
 PROJECT_ROOT="$(git rev-parse --show-toplevel)"
 export PROJECT_ROOT
 
-# Validate bats libraries exist before loading
+# bats-support and bats-assert are optional. hack/tools.sh fetches them from
+# GitHub, which is not possible in an environment restricted to already
+# configured package repositories, and neither is packaged by Fedora or RHEL.
+# bats itself is packaged, so when they are missing fall back to local
+# equivalents of the four assertions this suite uses.
+BATS_ASSERT_AVAILABLE=1
 for lib in bats-support bats-assert; do
 	if [[ ! -d "${PROJECT_ROOT}/tmp/bin/${lib}" ]]; then
-		echo "ERROR: ${lib} not found. Run: ./hack/tools.sh bats" >&2
-		exit 1
+		BATS_ASSERT_AVAILABLE=0
 	fi
 done
+export BATS_ASSERT_AVAILABLE
 
 # Directory containing the scripts under test
 SCRIPT_DIR="${PROJECT_ROOT}/collection-scripts"
@@ -21,9 +26,13 @@ export SCRIPT_DIR
 FIXTURES_DIR="${PROJECT_ROOT}/tests/fixtures"
 export FIXTURES_DIR
 
-# Load bats helper libraries
-load "${PROJECT_ROOT}/tmp/bin/bats-support/load"
-load "${PROJECT_ROOT}/tmp/bin/bats-assert/load"
+# Load bats helper libraries, or the local fallback
+if [[ "${BATS_ASSERT_AVAILABLE}" -eq 1 ]]; then
+	load "${PROJECT_ROOT}/tmp/bin/bats-support/load"
+	load "${PROJECT_ROOT}/tmp/bin/bats-assert/load"
+else
+	load "${PROJECT_ROOT}/tests/bats_assert_fallback.bash"
+fi
 
 # Common setup for all tests
 setup() {
