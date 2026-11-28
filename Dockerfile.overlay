@@ -1,0 +1,50 @@
+# Layer better-gather's collection scripts onto an existing must-gather image.
+#
+# BASE is deliberately not defaulted. This image adds nothing but shell
+# scripts -- no packages, no binaries -- so every CVE it carries comes from
+# whatever it is layered on, and a default would be the wrong answer most of
+# the time. The public community images are badly out of date:
+#
+#   quay.io/openshift/origin-must-gather:latest   built 2026-02-13
+#   quay.io/kubevirt/must-gather:latest           built 2026-07-06
+#   quay.io/ocs-dev/ocs-must-gather:latest        built 2025-07-02
+#
+# and none of them has a fresher tag; `latest` is the newest they publish.
+# Building on one of those is how a scan ends up far worse than a stock
+# must-gather.
+#
+# The right base is the image your cluster already runs, which carries
+# exactly the CVEs you have already accepted and nothing more:
+#
+#   make image-overlay BASE=$(oc adm release info --image-for=must-gather)
+#
+# For the CNV and ODF forks, take the image the operator advertises:
+#
+#   oc get csv -n openshift-cnv -o json | jq -r '..|.["operators.openshift.io/must-gather-image"]? // empty'
+#
+# CI has no pull credentials for any cluster's image, so it builds its own
+# base from UBI9 -- see Dockerfile.base. Either way the result is labelled
+# with the base it used and when that base was built, so it is never a
+# mystery what a scan is actually reporting on.
+
+ARG BASE
+FROM ${BASE}
+
+COPY collection-scripts/ /usr/bin/
+
+# In the overlay rather than the base, so it travels onto whatever image you
+# layer onto. gather prints it and copies it into every collection.
+COPY DISCLAIMER /usr/share/better-gather/DISCLAIMER
+
+ARG BASE
+ARG BASE_BUILT="unknown"
+LABEL io.k8s.display-name="better-gather" \
+      io.k8s.description="Unofficial must-gather collection scripts that honour --since. Not a Red Hat product." \
+      better-gather.base="${BASE}" \
+      better-gather.base-built="${BASE_BUILT}" \
+      better-gather.disclaimer="Not a Red Hat product: unofficial fork of openshift/must-gather, unsupported, no warranty. See /usr/share/better-gather/DISCLAIMER" \
+      org.opencontainers.image.title="better-gather" \
+      org.opencontainers.image.description="Unofficial fork of openshift/must-gather in which --since bounds what is collected. Not a Red Hat product." \
+      org.opencontainers.image.vendor="dsedgmen (unofficial -- not Red Hat)" \
+      org.opencontainers.image.source="https://github.com/dsedgmen/better-gather" \
+      org.opencontainers.image.licenses="Apache-2.0"
