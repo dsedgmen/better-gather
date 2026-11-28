@@ -1,0 +1,26 @@
+================================================================================
+  better-gather -- NOT A RED HAT PRODUCT
+================================================================================
+
+This collection was produced by better-gather, a personal, unofficial fork of
+https://github.com/openshift/must-gather.
+
+  * It is not built, reviewed, supported or endorsed by Red Hat, and it is
+    not a Red Hat product. The name and the upstream project are used only to
+    say what it is a fork of.
+
+  * It is provided WITHOUT WARRANTY OR SUPPORT OF ANY KIND, to the fullest
+    extent permitted by law. You use it, and anything it collects, entirely
+    at your own risk. See LICENSE.
+
+  * Its collection scripts deliberately differ from the supported
+    must-gather: --since actually bounds what is collected, so this archive
+    may hold less than a stock must-gather would for the same cluster. That
+    is the point of the fork, and it is also a reason not to treat the two as
+    interchangeable.
+
+If you are attaching this to a Red Hat support case, say that it came from an
+unofficial tool. Support may ask you for a collection from the supported
+must-gather image instead.
+
+Source: https://github.com/dsedgmen/better-gather
