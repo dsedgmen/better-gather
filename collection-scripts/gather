@@ -5,6 +5,18 @@
 echo "openshift/must-gather" >/must-gather/version
 version >>/must-gather/version
 
+
+# Say whose tool this is, in the run output and in the archive. Whoever ends
+# up reading the collection is rarely whoever ran it, and nothing else in a
+# must-gather tarball would tell them it did not come from the supported
+# image. Not fatal if the file is missing: someone may have assembled an
+# image without it.
+if [ -r /usr/share/better-gather/DISCLAIMER ]; then
+	cat /usr/share/better-gather/DISCLAIMER >&2
+	cp /usr/share/better-gather/DISCLAIMER /must-gather/DISCLAIMER
+else
+	echo "WARNING: better-gather is not a Red Hat product and is unsupported." >&2
+fi
 source $(dirname "$0")/common.sh
 get_log_collection_args
 
